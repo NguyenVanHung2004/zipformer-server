@@ -7,52 +7,7 @@ import numpy as np
 import logging
 import sys
 from collections import deque
-import urllib.request
-import tarfile
-import shutil
 
-# --- AUTO-DOWNLOAD MODELS (For No-Dockerfile Deployment) ---
-def check_and_download_models():
-    # 1. Define URLs
-    asr_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-2024-03-07.tar.bz2"
-    vad_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
-    
-    # 2. Check & Download VAD
-    if not os.path.exists("model_vi/silero_vad.onnx"):
-        print("⏳ Downloading VAD model...")
-        os.makedirs("model_vi", exist_ok=True)
-        try:
-            urllib.request.urlretrieve(vad_url, "model_vi/silero_vad.onnx")
-            print("✅ VAD Downloaded")
-        except Exception as e:
-            print(f"❌ VAD Download Failed: {e}")
-
-    # 3. Check & Download ASR
-    # Check for a critical file to confirm ASR is present
-    if not os.path.exists("model_vi/tokens.txt"):
-        print(f"⏳ Downloading ASR Model from {asr_url}...")
-        try:
-            filename = "asr_model.tar.bz2"
-            urllib.request.urlretrieve(asr_url, filename)
-            print("📦 Extracting ASR...")
-            with tarfile.open(filename, "r:bz2") as tar:
-                tar.extractall(".")
-            
-            # Move files from 'sherpa-onnx-zipformer-vi-2024-03-07' to 'model_vi'
-            extracted_dir = "sherpa-onnx-zipformer-vi-2024-03-07"
-            if os.path.exists(extracted_dir):
-                os.makedirs("model_vi", exist_ok=True) # Ensure target dir exists
-                for f in os.listdir(extracted_dir):
-                    shutil.move(os.path.join(extracted_dir, f), "model_vi")
-                os.rmdir(extracted_dir)
-            
-            if os.path.exists(filename): os.remove(filename)
-            print("✅ ASR Model Ready")
-        except Exception as e:
-            print(f"❌ ASR Download Failed: {e}")
-
-# Run check immediately
-check_and_download_models()
 
 # --- CONFIGURATION ---
 PORT = int(os.environ.get("PORT", 6006))
