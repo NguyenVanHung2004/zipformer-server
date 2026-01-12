@@ -12,51 +12,69 @@ import urllib.request
 import tarfile
 import shutil
 
-# --- AUTO-DOWNLOAD MODELS (For No-Dockerfile Deployment) ---
+# --- AUTO-DOWNLOAD MODELS (Robust Version) ---
+def download_file(url, target_path, min_size=1024):
+    print(f"⏳ Downloading {url} to {target_path}...")
+    try:
+        # Use simple urlretrieve but verify size afterwards
+        urllib.request.urlretrieve(url, target_path)
+        
+        size = os.path.getsize(target_path)
+        if size < min_size:
+            print(f"❌ File too small ({size} bytes). Probable 404/Error page. Deleting...")
+            os.remove(target_path)
+            return False
+            
+        print(f"✅ Downloaded ({size/1024:.2f} KB)")
+        return True
+    except Exception as e:
+        print(f"❌ Download Failed: {e}")
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        return False
+
 def check_and_download_models():
     # 1. Define URLs
     asr_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-2025-04-20.tar.bz2"
+    # Alternative Mirror for VAD if GitHub fails
     vad_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
     
     # 2. Check & Download VAD
-    if not os.path.exists("model_vi/silero_vad.onnx"):
-        print("⏳ Downloading VAD model...")
+    if not os.path.exists("model_vi/silero_vad.onnx") or os.path.getsize("model_vi/silero_vad.onnx") < 1024:
         os.makedirs("model_vi", exist_ok=True)
-        try:
-            urllib.request.urlretrieve(vad_url, "model_vi/silero_vad.onnx")
-            print("✅ VAD Downloaded")
-        except Exception as e:
-            print(f"❌ VAD Download Failed: {e}")
+        # Try primary URL
+        if not download_file(vad_url, "model_vi/silero_vad.onnx"):
+            # Try mirror if primary fails
+            print("⚠️ Retrying with mirror...")
+            download_file("https://huggingface.co/csukuangfj/silero-vad-onnx/resolve/main/silero_vad.onnx", "model_vi/silero_vad.onnx")
 
     # 3. Check & Download ASR
-    # Check if ANY encoder file exists
     if not glob.glob("model_vi/encoder-*.onnx"):
-        print(f"⏳ Downloading ASR Model from {asr_url}...")
-        try:
-            filename = "asr_model.tar.bz2"
-            urllib.request.urlretrieve(asr_url, filename)
+        filename = "asr_model.tar.bz2"
+        if download_file(asr_url, filename):
             print("📦 Extracting ASR...")
-            with tarfile.open(filename, "r:bz2") as tar:
-                tar.extractall(".")
-            
-            # Move files from 'sherpa-onnx-zipformer-vi-2025-04-20' to 'model_vi'
-            extracted_dir = "sherpa-onnx-zipformer-vi-2025-04-20"
-            if os.path.exists(extracted_dir):
-                os.makedirs("model_vi", exist_ok=True) 
+            try:
+                with tarfile.open(filename, "r:bz2") as tar:
+                    tar.extractall(".")
                 
-                # Delete existing .onnx files in model_vi to avoid conflicts (EXCEPT VAD)
-                for f in glob.glob("model_vi/*.onnx"):
-                    if "silero_vad" not in f:
-                        os.remove(f)
+                extracted_dir = "sherpa-onnx-zipformer-vi-2025-04-20"
+                if os.path.exists(extracted_dir):
+                    os.makedirs("model_vi", exist_ok=True) 
+                    
+                    # Delete existing .onnx files in model_vi (EXCEPT VAD)
+                    for f in glob.glob("model_vi/*.onnx"):
+                        if "silero_vad" not in f:
+                            os.remove(f)
+                    
+                    for f in os.listdir(extracted_dir):
+                        shutil.move(os.path.join(extracted_dir, f), "model_vi")
+                    os.rmdir(extracted_dir)
                 
-                for f in os.listdir(extracted_dir):
-                    shutil.move(os.path.join(extracted_dir, f), "model_vi")
-                os.rmdir(extracted_dir)
-            
-            if os.path.exists(filename): os.remove(filename)
-            print("✅ ASR Model Ready")
-        except Exception as e:
-            print(f"❌ ASR Download Failed: {e}")
+                print("✅ ASR Model Ready")
+            except Exception as e:
+                print(f"❌ Extraction Failed: {e}")
+            finally:
+                if os.path.exists(filename): os.remove(filename)
 
 # Run check immediately
 check_and_download_models()
