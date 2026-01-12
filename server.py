@@ -7,6 +7,59 @@ import numpy as np
 import logging
 import sys
 from collections import deque
+import glob
+import urllib.request
+import tarfile
+import shutil
+
+# --- AUTO-DOWNLOAD MODELS (For No-Dockerfile Deployment) ---
+def check_and_download_models():
+    # 1. Define URLs
+    asr_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-2025-04-20.tar.bz2"
+    vad_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+    
+    # 2. Check & Download VAD
+    if not os.path.exists("model_vi/silero_vad.onnx"):
+        print("⏳ Downloading VAD model...")
+        os.makedirs("model_vi", exist_ok=True)
+        try:
+            urllib.request.urlretrieve(vad_url, "model_vi/silero_vad.onnx")
+            print("✅ VAD Downloaded")
+        except Exception as e:
+            print(f"❌ VAD Download Failed: {e}")
+
+    # 3. Check & Download ASR
+    # Check if ANY encoder file exists
+    if not glob.glob("model_vi/encoder-*.onnx"):
+        print(f"⏳ Downloading ASR Model from {asr_url}...")
+        try:
+            filename = "asr_model.tar.bz2"
+            urllib.request.urlretrieve(asr_url, filename)
+            print("📦 Extracting ASR...")
+            with tarfile.open(filename, "r:bz2") as tar:
+                tar.extractall(".")
+            
+            # Move files from 'sherpa-onnx-zipformer-vi-2025-04-20' to 'model_vi'
+            extracted_dir = "sherpa-onnx-zipformer-vi-2025-04-20"
+            if os.path.exists(extracted_dir):
+                os.makedirs("model_vi", exist_ok=True) 
+                
+                # Delete existing .onnx files in model_vi to avoid conflicts
+                for f in glob.glob("model_vi/*.onnx"):
+                    os.remove(f)
+                
+                for f in os.listdir(extracted_dir):
+                    shutil.move(os.path.join(extracted_dir, f), "model_vi")
+                os.rmdir(extracted_dir)
+            
+            if os.path.exists(filename): os.remove(filename)
+            print("✅ ASR Model Ready")
+        except Exception as e:
+            print(f"❌ ASR Download Failed: {e}")
+
+# Run check immediately
+check_and_download_models()
+
 
 
 # --- CONFIGURATION ---
@@ -16,10 +69,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def create_components():
     model_dir = "./model_vi"
+    
+    # Dynamic file finding
     tokens_path = os.path.join(model_dir, "tokens.txt")
-    encoder_path = os.path.join(model_dir, "encoder-epoch-99-avg-1.onnx")
-    decoder_path = os.path.join(model_dir, "decoder-epoch-99-avg-1.onnx")
-    joiner_path = os.path.join(model_dir, "joiner-epoch-99-avg-1.onnx")
+    enc_files = glob.glob(os.path.join(model_dir, "encoder-*.onnx"))
+    dec_files = glob.glob(os.path.join(model_dir, "decoder-*.onnx"))
+    join_files = glob.glob(os.path.join(model_dir, "joiner-*.onnx"))
+    
+    if not (enc_files and dec_files and join_files):
+         logging.error(f"❌ Could not find model files in {model_dir}")
+         sys.exit(1)
+         
+    encoder_path = enc_files[0]
+    decoder_path = dec_files[0]
+    joiner_path = join_files[0]
+    
     vad_model = os.path.join(model_dir, "silero_vad.onnx")
 
     if not all(os.path.exists(p) for p in [tokens_path, encoder_path, decoder_path, joiner_path, vad_model]):
@@ -36,7 +100,6 @@ def create_components():
         sample_rate=16000,
         feature_dim=80,
         decoding_method="greedy_search",
-        model_type="zipformer", # Use zipformer for 2023 model
     )
     
     logging.info("⏳ Đang tải VAD...")

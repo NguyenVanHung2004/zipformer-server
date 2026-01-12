@@ -1,4 +1,5 @@
 
+model_vi/
 __pycache__/
 .venv/
 *.pyc
