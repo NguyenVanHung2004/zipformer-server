@@ -44,9 +44,10 @@ def check_and_download_models():
             if os.path.exists(extracted_dir):
                 os.makedirs("model_vi", exist_ok=True) 
                 
-                # Delete existing .onnx files in model_vi to avoid conflicts
+                # Delete existing .onnx files in model_vi to avoid conflicts (EXCEPT VAD)
                 for f in glob.glob("model_vi/*.onnx"):
-                    os.remove(f)
+                    if "silero_vad" not in f:
+                        os.remove(f)
                 
                 for f in os.listdir(extracted_dir):
                     shutil.move(os.path.join(extracted_dir, f), "model_vi")
