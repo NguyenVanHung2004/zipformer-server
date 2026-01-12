@@ -86,8 +86,14 @@ def create_components():
     
     vad_model = os.path.join(model_dir, "silero_vad.onnx")
 
-    if not all(os.path.exists(p) for p in [tokens_path, encoder_path, decoder_path, joiner_path, vad_model]):
-        logging.error(f"❌ Thiếu model files! Kiểm tra thư mục '{model_dir}'.")
+    missing_files = []
+    for p in [tokens_path, encoder_path, decoder_path, joiner_path, vad_model]:
+        if not os.path.exists(p):
+            missing_files.append(p)
+            
+    if missing_files:
+        logging.error(f"❌ Thiếu model files: {missing_files}")
+        logging.error(f"Contents of {model_dir}: {os.listdir(model_dir)}")
         sys.exit(1)
 
     logging.info("⏳ Đang tải Offline Recognizer...")
