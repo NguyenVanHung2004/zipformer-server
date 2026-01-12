@@ -128,6 +128,17 @@ def create_components():
     )
     
     logging.info("⏳ Đang tải VAD...")
+    
+    # [DEBUG] Check file header
+    if os.path.exists(vad_model):
+        try:
+            with open(vad_model, "rb") as f:
+                header = f.read(64)
+                logging.info(f"🔍 VAD Header (hex): {header.hex()}")
+                logging.info(f"🔍 VAD Header (text): {header}")
+        except Exception as e:
+             logging.error(f"❌ Cannot read VAD header: {e}")
+
     vad_config = sherpa_onnx.VadModelConfig()
     vad_config.silero_vad.model = vad_model
     vad_config.sample_rate = 16000
