@@ -1,0 +1,6 @@
+model_vi/
+__pycache__/
+.venv/
+*.pyc
+test_audio.wav
+.env
