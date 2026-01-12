@@ -36,7 +36,7 @@ def create_components():
         sample_rate=16000,
         feature_dim=80,
         decoding_method="greedy_search",
-        model_type="zipformer2", # Use zipformer2 for offline model
+        model_type="zipformer", # Use zipformer for 2023 model
     )
     
     logging.info("⏳ Đang tải VAD...")
