@@ -168,10 +168,10 @@ async def handle_connection(websocket):
     
     # ⚡ TUNING VAD PARAMETERS (NOISE REDUCTION)
     # Tăng threshold lên 0.6 để lọc tiếng chuột/phím (chỉ giọng nói rõ mới bắt)
-    vad_config.silero_vad.threshold = 0.6         
-    vad_config.silero_vad.min_silence_duration = 0.5 
-    # Tăng min_speech lên 0.5s để bỏ qua tiếng click ngắn
-    vad_config.silero_vad.min_speech_duration = 0.5 
+    vad_config.silero_vad.threshold = 0.5         
+    vad_config.silero_vad.min_silence_duration = 0.3 # Reduce wait time for faster response
+    # Tăng min_speech lên 0.3s để bỏ qua tiếng click ngắn
+    vad_config.silero_vad.min_speech_duration = 0.3 
     
     client_vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=60)
     
@@ -244,6 +244,9 @@ async def handle_connection(websocket):
                     text = result.text.strip()
 
                 if text:
+                    # [FIX]: Capitalize the first letter (sentence case) instead of all caps
+                    text = text.capitalize()
+                    
                     words = []
                     if hasattr(result, 'tokens') and hasattr(result, 'timestamps'):
                         for i, token in enumerate(result.tokens):
