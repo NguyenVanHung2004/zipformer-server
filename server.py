@@ -55,7 +55,7 @@ def check_and_download_models():
 check_and_download_models()
 
 # --- CONFIGURATION ---
-PORT = 6006
+PORT = int(os.environ.get("PORT", 6006))
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -241,8 +241,8 @@ async def handle_connection(websocket):
         logging.error(f"❌ Lỗi connection: {e}")
 
 async def main():
-    server = await websockets.serve(handle_connection, "0.0.0.0", 6006)
-    logging.info("🚀 Server (VAD + Offline) đang lắng nghe tại ws://0.0.0.0:6006")
+    server = await websockets.serve(handle_connection, "0.0.0.0", PORT)
+    logging.info(f"🚀 Server (VAD + Offline) đang lắng nghe tại ws://0.0.0.0:{PORT}")
     await server.wait_closed()
 
 if __name__ == "__main__":
