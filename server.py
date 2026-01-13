@@ -181,9 +181,6 @@ async def handle_connection(websocket):
     last_decode_time = 0
     DECODE_INTERVAL = 1.0 # [TUNING] Reduce to 1.0s for better responsiveness
     
-    # [ROBUSTNESS] Pre-speech buffer to catch the start of sentences (Prevent "Head Trim")
-    pre_speech_buffer = deque(maxlen=20) # 20 chunks * 0.X sec
-    
     current_sentence_id = 0
     current_speaker = 0 
     last_segment_end_time = 0 # Track time to detect long pauses
@@ -217,13 +214,10 @@ async def handle_connection(websocket):
                 # Clip an toàn
                 samples = np.clip(samples, -1.0, 1.0)
                 
-                # 1. Add to pre-speech buffer (History)
-                pre_speech_buffer.append(samples)
-                
-                # 2. Add to rolling buffer (for partial results)
+                # 1. Add to rolling buffer (for partial results)
                 rolling_buffer.extend(samples)
                 
-                # 3. Feed to VAD (for final decision)
+                # 2. Feed to VAD (for final decision)
                 client_vad.accept_waveform(samples)
             
             # [DEBUG] Track buffer size to ensure it's growing
@@ -240,18 +234,9 @@ async def handle_connection(websocket):
                 speech_segment = client_vad.front.samples
                 client_vad.pop()
                 
-                # [ROBUSTNESS] Prepend History to fix "Lost Head" issue
-                # Concatenate buffered history + current segment
-                prepend_duration = 0.0
-                if pre_speech_buffer:
-                    history_samples = np.concatenate(list(pre_speech_buffer))
-                    # Limit history to ~0.5s (8000 samples) to avoid duplicating too much
-                    if len(history_samples) > 8000:
-                        history_samples = history_samples[-8000:]
-                    
-                    prepend_duration = len(history_samples) / 16000.0
-                    speech_segment = np.concatenate((history_samples, speech_segment))
-                    
+                # [FIX] Removed Manual Prepend History to prevent "Word Repetition" (e.g. "Trời hôm nay")
+                # VAD usually handles boundaries well enough.
+                
                 # New: Calculate offset for timestamps
                 segment_offset_seconds = 0.0
                 if hasattr(client_vad.front, 'start'):
@@ -273,9 +258,9 @@ async def handle_connection(websocket):
                      text = result.text.strip().capitalize()
                 
                 if text:
-                    # [SMART PARAGRAPHING] Toggle Speaker ONLY on long pause (> 3.0s)
+                    # [SMART PARAGRAPHING] Toggle Speaker ONLY on long pause (> 2.0s)
                     time_gap = current_time - last_segment_end_time
-                    if last_segment_end_time > 0 and time_gap > 3.0:
+                    if last_segment_end_time > 0 and time_gap > 2.0:
                         current_speaker = 1 - current_speaker # New Paragraph
                         logging.info(f"¶ New Paragraph (Gap: {time_gap:.2f}s)")
                         
@@ -288,7 +273,7 @@ async def handle_connection(websocket):
                              local_start = result.timestamps[i]
                              
                              # Calculate Absolute Timestamp
-                             absolute_start = segment_offset_seconds - prepend_duration + local_start
+                             absolute_start = segment_offset_seconds + local_start # Removed prepend_duration
                              absolute_start = max(0.0, absolute_start)
                              
                              start = absolute_start
@@ -296,7 +281,7 @@ async def handle_connection(websocket):
                              
                              if i < len(result.timestamps) - 1:
                                  next_local = result.timestamps[i+1]
-                                 next_absolute = segment_offset_seconds - prepend_duration + next_local
+                                 next_absolute = segment_offset_seconds + next_local # Removed prepend_duration
                                  end = next_absolute
                              
                              clean_word = token.replace('▁', '').strip()
@@ -340,10 +325,10 @@ async def handle_connection(websocket):
                 rolling_buffer = []  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
-            # If user speaks continuously for > 8 seconds without silence, FORCE a cut.
-            # Set to 8s as a balanced limit
-            if len(rolling_buffer) > 128000: # 16000 * 8s
-                 logging.info(f"⚠️ Forced Segmentation (Long Speech > 8s)")
+            # If user speaks continuously for > 10 seconds without silence, FORCE a cut.
+            # Set to 10s as a balanced limit
+            if len(rolling_buffer) > 160000: # 16000 * 10s
+                 logging.info(f"⚠️ Forced Segmentation (Long Speech > 10s)")
                  stream = recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
                  recognizer.decode_stream(stream)
