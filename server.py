@@ -179,7 +179,7 @@ async def handle_connection(websocket):
     # --- PSEUDO-STREAMING LOGIC ---
     rolling_buffer = [] 
     last_decode_time = 0
-    DECODE_INTERVAL = 0.8
+    DECODE_INTERVAL = 1.0 # [TUNING] Reduce to 1.0s for better responsiveness
     
     # [ROBUSTNESS] Pre-speech buffer to catch the start of sentences (Prevent "Head Trim")
     pre_speech_buffer = deque(maxlen=20) # 20 chunks * 0.X sec
@@ -198,24 +198,40 @@ async def handle_connection(websocket):
             # Nếu âm lượng quá bé (max < 0.1), mới boost lên.
             
             max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
-            if max_amp > 0 and max_amp < 0.3: # Chỉ boost nếu âm thanh thực sự nhỏ
-                target_gain = 0.5 / max_amp # Target mức 0.5 (an toàn)
-                # Giới hạn Gain không quá 5 lần để tránh noise floor bị rồ lên
-                perform_gain = min(target_gain, 4.0) 
-                samples = samples * perform_gain
             
-            # Clip an toàn
-            samples = np.clip(samples, -1.0, 1.0)
+            # [NOISE GATE] Prevent amplifying silence/noise
+            # If signal is too weak (< 0.03), treat as silence/noise to ignore.
+            if max_amp < 0.03:
+                # Still feed to VAD so it can detect silence duration (End of Speech)
+                client_vad.accept_waveform(samples)
+                # But DO NOT accumulate to buffers (prevents Forced Segmentation on noise)
+                # And DO NOT boost gain (amplifying noise causes "Ừ" "Ờ" output)
+                pass 
+            else:
+                if max_amp > 0 and max_amp < 0.3: # Chỉ boost nếu âm thanh thực sự nhỏ
+                    target_gain = 0.5 / max_amp # Target mức 0.5 (an toàn)
+                    # Giới hạn Gain không quá 5 lần để tránh noise floor bị rồ lên
+                    perform_gain = min(target_gain, 4.0) 
+                    samples = samples * perform_gain
+                
+                # Clip an toàn
+                samples = np.clip(samples, -1.0, 1.0)
+                
+                # 1. Add to pre-speech buffer (History)
+                pre_speech_buffer.append(samples)
+                
+                # 2. Add to rolling buffer (for partial results)
+                rolling_buffer.extend(samples)
+                
+                # 3. Feed to VAD (for final decision)
+                client_vad.accept_waveform(samples)
             
-            # 1. Add to pre-speech buffer (History)
-            pre_speech_buffer.append(samples)
-            
-            # 2. Add to rolling buffer (for partial results)
-            rolling_buffer.extend(samples)
-            
-            # 3. Feed to VAD (for final decision)
-            client_vad.accept_waveform(samples)
-            
+            # [DEBUG] Track buffer size to ensure it's growing
+            if len(rolling_buffer) % 16000 < len(samples): 
+                # Log roughly every second
+                # logging.info(f"📊 Buffer Size: {len(rolling_buffer)} / 96000")
+                pass
+
             current_time = asyncio.get_event_loop().time()
             
             # A. CHECK FOR FINAL SEGMENTS (VAD Decision)
@@ -257,9 +273,9 @@ async def handle_connection(websocket):
                      text = result.text.strip().capitalize()
                 
                 if text:
-                    # [SMART PARAGRAPHING] Toggle Speaker ONLY on long pause (> 2.0s)
+                    # [SMART PARAGRAPHING] Toggle Speaker ONLY on long pause (> 3.0s)
                     time_gap = current_time - last_segment_end_time
-                    if last_segment_end_time > 0 and time_gap > 2.0:
+                    if last_segment_end_time > 0 and time_gap > 3.0:
                         current_speaker = 1 - current_speaker # New Paragraph
                         logging.info(f"¶ New Paragraph (Gap: {time_gap:.2f}s)")
                         
@@ -324,9 +340,10 @@ async def handle_connection(websocket):
                 rolling_buffer = []  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
-            # If user speaks continuously for > 15 seconds without silence, FORCE a cut.
-            if len(rolling_buffer) > 240000: # 16000 * 15s
-                 logging.info("⚠️ Forced Segmentation (Long Speech detected)")
+            # If user speaks continuously for > 8 seconds without silence, FORCE a cut.
+            # Set to 8s as a balanced limit
+            if len(rolling_buffer) > 128000: # 16000 * 8s
+                 logging.info(f"⚠️ Forced Segmentation (Long Speech > 8s)")
                  stream = recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
                  recognizer.decode_stream(stream)
@@ -339,7 +356,7 @@ async def handle_connection(websocket):
                     words_forced = [{
                         "word": text,
                         "start": 0.0,
-                        "end": 15.0,
+                        "end": 10.0,
                         "confidence": 1.0,
                         "speaker": current_speaker
                     }]
@@ -348,6 +365,7 @@ async def handle_connection(websocket):
                         "channel": {"alternatives": [{
                             "transcript": text, 
                             "confidence": 1.0,
+                            "speaker": current_speaker, # Added top-level consistency
                             "words": words_forced
                         }]},
                         "is_final": True
@@ -355,8 +373,9 @@ async def handle_connection(websocket):
                     
                     current_speaker = 1 - current_speaker # Toggle speaker
                  
-                 rolling_buffer = [] # Clear buffer to start fresh
-                 client_vad.reset() # Reset VAD to avoid carrying over old state
+                 # [CRITICAL FIX] Always clear buffer after Forced Segmentation, even if text is empty!
+                 rolling_buffer = [] 
+                 client_vad.reset()
             
             # B. PARTIAL DECODE (Visual Feedback)
             # Only if we have enough data and enough time passed
