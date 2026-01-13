@@ -32,25 +32,34 @@ async def run_client():
                     await ws.send(data.tobytes())
 
             async def receive_result():
+                print("\nListening...")
+                current_line_length = 0
+                
                 while True:
                     try:
                         msg = await ws.recv()
                         data = json.loads(msg)
                         
-                        # Parsing Deepgram format
                         if 'channel' in data:
                             alt = data['channel']['alternatives'][0]
                             text = alt['transcript']
-                            words = alt.get('words', [])
+                            is_final = data.get('is_final', False)
                             
-                            print(f"\n📝 Text: {text}")
-                            if words:
-                                print("   ⏱️ Words:")
-                                for w in words:
-                                    print(f"      - {w['word']} ({w['start']:.2f}s -> {w['end']:.2f}s)")
-                        else:
-                            # Fallback or other messages
-                            print(f"\n📩 Message: {msg}")
+                            # Clear current line visually
+                            sys.stdout.write('\r' + ' ' * (current_line_length + 10) + '\r')
+                            
+                            if is_final:
+                                # Start a new line for the final result
+                                sys.stdout.write(f"✅ {text}\n")
+                                current_line_length = 0
+                            else:
+                                # Overwrite line for partial result
+                                display_text = f"⏳ {text}"
+                                sys.stdout.write(display_text)
+                                current_line_length = len(display_text)
+                                
+                            sys.stdout.flush()
+                            
                     except websockets.exceptions.ConnectionClosed:
                         print("\n❌ Server đã đóng kết nối.")
                         break

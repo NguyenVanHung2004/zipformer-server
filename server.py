@@ -166,131 +166,227 @@ async def handle_connection(websocket):
     vad_config.silero_vad.model = vad_model
     vad_config.sample_rate = 16000
     
-    # ⚡ TUNING VAD PARAMETERS (NOISE REDUCTION)
-    # Tăng threshold lên 0.6 để lọc tiếng chuột/phím (chỉ giọng nói rõ mới bắt)
-    vad_config.silero_vad.threshold = 0.5         
-    vad_config.silero_vad.min_silence_duration = 0.3 # Reduce wait time for faster response
-    # Tăng min_speech lên 0.3s để bỏ qua tiếng click ngắn
-    vad_config.silero_vad.min_speech_duration = 0.3 
+    # ⚡ TUNING VAD PARAMETERS (SENSITIVITY BOOST)
+    # Giảm threshold xuống 0.3 để bắt giọng nói nhỏ/xa tốt hơn
+    # ⚡ TUNING VAD PARAMETERS
+    # Tang threshold len 0.45 de do bi noise lam treo cau
+    vad_config.silero_vad.threshold = 0.45         
+    vad_config.silero_vad.min_silence_duration = 0.5
+    vad_config.silero_vad.min_speech_duration = 0.25 
     
     client_vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=60)
     
-    # 🎧 BUFFERING LOGIC (Để bắt lại đoạn đầu bị mất)
-    # Lưu giữ 0.5 giây âm thanh trước đó (16000 * 0.5 = 8000 mẫu)
-    from collections import deque
-    # Mỗi chunk từ client là 1 lượng samples nhất định, ta lưu raw samples vào deque
-    # Tuy nhiên deque lưu từng item, nếu item là chunk to thì khó quản lý size chính xác.
-    # Ta sẽ lưu list các array, và estimte size.
-    # Đơn giản hơn: lưu 1 buffer vòng tròn bằng numpy array nhưng tốn chi phí copy.
-    # Cách hiệu quả: Deque chứa các chunk, tổng duration ~0.5s.
+    # --- PSEUDO-STREAMING LOGIC ---
+    rolling_buffer = [] 
+    last_decode_time = 0
+    DECODE_INTERVAL = 0.8
     
-    pre_speech_buffer = deque(maxlen=20) # Giả sử mỗi chunk ~50ms -> 20 chunks = 1s
+    # [ROBUSTNESS] Pre-speech buffer to catch the start of sentences (Prevent "Head Trim")
+    pre_speech_buffer = deque(maxlen=20) # 20 chunks * 0.X sec
     
+    current_sentence_id = 0
+    current_speaker = 0 
+    last_segment_end_time = 0 # Track time to detect long pauses
+
     try:
         async for message in websocket:
-            # message là bytes (audio chunk)
+            # message is bytes (audio chunk)
             samples = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
             
-            # Thêm vào buffer lịch sử
+            # [SMART GAIN CONTROl]
+            # Thay vì nhân 3 cứng nhắc (dễ vỡ tiếng nếu mic gần), ta dùng cơ chế "Normalize" nhẹ
+            # Nếu âm lượng quá bé (max < 0.1), mới boost lên.
+            
+            max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
+            if max_amp > 0 and max_amp < 0.3: # Chỉ boost nếu âm thanh thực sự nhỏ
+                target_gain = 0.5 / max_amp # Target mức 0.5 (an toàn)
+                # Giới hạn Gain không quá 5 lần để tránh noise floor bị rồ lên
+                perform_gain = min(target_gain, 4.0) 
+                samples = samples * perform_gain
+            
+            # Clip an toàn
+            samples = np.clip(samples, -1.0, 1.0)
+            
+            # 1. Add to pre-speech buffer (History)
             pre_speech_buffer.append(samples)
             
+            # 2. Add to rolling buffer (for partial results)
+            rolling_buffer.extend(samples)
+            
+            # 3. Feed to VAD (for final decision)
             client_vad.accept_waveform(samples)
             
+            current_time = asyncio.get_event_loop().time()
+            
+            # A. CHECK FOR FINAL SEGMENTS (VAD Decision)
+            # If VAD has found a segment, it means a sentence has finished.
             while not client_vad.empty():
                 speech_segment = client_vad.front.samples
-                # [NEW] Lấy offset của segment này trong cả chuỗi streaming
-                # client_vad.front.start là index sample bắt đầu của segment
-                segment_offset_seconds = 0.0
-                if hasattr(client_vad.front, 'start'):
-                     segment_offset_seconds = client_vad.front.start / 16000.0
-                
                 client_vad.pop()
                 
-                if len(speech_segment) < 1000: # Bỏ qua đoạn quá ngắn (< 0.06s)
-                    continue
-                
-                # ... (Padding code omitted for brevity, ensure we adjust offset if padding is used? 
-                # Actually padding is prepended *before* this segment in my logic, 
-                # but physically concatenating it changes the relative time in `recognizer`.
-                # If I prepend history, the recognizer sees [HISTORY + SEGMENT].
-                # The Recognizer timestamps start at 0.
-                # So relative to stream:
-                # Real start = segment_offset_seconds - duration(history)
-                # Let's handle this carefully.
-                
+                # [ROBUSTNESS] Prepend History to fix "Lost Head" issue
+                # Concatenate buffered history + current segment
                 prepend_duration = 0.0
                 if pre_speech_buffer:
                     history_samples = np.concatenate(list(pre_speech_buffer))
+                    # Limit history to ~0.5s (8000 samples) to avoid duplicating too much
                     if len(history_samples) > 8000:
                         history_samples = history_samples[-8000:]
                     
                     prepend_duration = len(history_samples) / 16000.0
                     speech_segment = np.concatenate((history_samples, speech_segment))
+                    
+                # New: Calculate offset for timestamps
+                segment_offset_seconds = 0.0
+                if hasattr(client_vad.front, 'start'):
+                     segment_offset_seconds = client_vad.front.start / 16000.0
                 
-                logging.info(f"🗣️ Phát hiện tiếng nói ({len(speech_segment)/16000:.2f}s). Offset: {segment_offset_seconds:.2f}s")
-                
+                # Decode the Clean Segment
                 stream = recognizer.create_stream()
                 stream.accept_waveform(16000, speech_segment)
                 recognizer.decode_stream(stream)
                 result = stream.result
                 
-                # [FIX]: Reconstruct text from tokens
+                # Reconstruct text properly
                 if hasattr(result, 'tokens'):
-                    raw_tokens = result.tokens
-                    reconstructed_text = "".join(raw_tokens).replace('▁', ' ').strip()
-                    import re
-                    text = re.sub(r'\s+', ' ', reconstructed_text)
+                     raw_tokens = result.tokens
+                     reconstructed_text = "".join(raw_tokens).replace('▁', ' ').strip()
+                     import re
+                     text = re.sub(r'\s+', ' ', reconstructed_text).capitalize()
                 else:
-                    text = result.text.strip()
-
+                     text = result.text.strip().capitalize()
+                
                 if text:
-                    # [FIX]: Capitalize the first letter (sentence case) instead of all caps
-                    text = text.capitalize()
-                    
+                    # [SMART PARAGRAPHING] Toggle Speaker ONLY on long pause (> 2.0s)
+                    time_gap = current_time - last_segment_end_time
+                    if last_segment_end_time > 0 and time_gap > 2.0:
+                        current_speaker = 1 - current_speaker # New Paragraph
+                        logging.info(f"¶ New Paragraph (Gap: {time_gap:.2f}s)")
+                        
+                    last_segment_end_time = current_time # Update for next time
+
+                    # [FEATURE] Word-level Timestamps & Speaker Toggle
                     words = []
                     if hasattr(result, 'tokens') and hasattr(result, 'timestamps'):
                         for i, token in enumerate(result.tokens):
-                            # Timestamp từ recognizer là relative so với đầu speech_segment (đã gồm padding)
-                            local_start = result.timestamps[i]
-                            
-                            # Chuyển sang Absolute Timestamp
-                            # Absolute = Segment_Start_In_Stream - Prepend_Duration + Local_Start
-                            absolute_start = segment_offset_seconds - prepend_duration + local_start
-                            
-                            # Đảm bảo không âm
-                            absolute_start = max(0.0, absolute_start)
-                            
-                            start = absolute_start
-                            end = start + 0.1
-                            if i < len(result.timestamps) - 1:
-                                next_local = result.timestamps[i+1]
-                                next_absolute = segment_offset_seconds - prepend_duration + next_local
-                                end = next_absolute
-                            
-                            clean_word = token.replace('▁', '').strip()
-                            words.append({
-                                "word": clean_word,
-                                "start": start,
-                                "end": end,
-                                "confidence": 1.0,
-                                "speaker": 0
-                            })
-
-                    # Deepgram-compatible format
+                             local_start = result.timestamps[i]
+                             
+                             # Calculate Absolute Timestamp
+                             absolute_start = segment_offset_seconds - prepend_duration + local_start
+                             absolute_start = max(0.0, absolute_start)
+                             
+                             start = absolute_start
+                             end = start + 0.1
+                             
+                             if i < len(result.timestamps) - 1:
+                                 next_local = result.timestamps[i+1]
+                                 next_absolute = segment_offset_seconds - prepend_duration + next_local
+                                 end = next_absolute
+                             
+                             clean_word = token.replace('▁', '').strip()
+                             words.append({
+                                 "word": clean_word,
+                                 "start": round(start, 2),
+                                 "end": round(end, 2),
+                                 "confidence": 1.0,
+                                 "speaker": current_speaker
+                             })
+                    
+                    # [FALLBACK] Ensure "words" is not empty so client can access words[0].speaker
+                    if not words:
+                        words.append({
+                            "word": text,
+                            "start": round(segment_offset_seconds, 2),
+                            "end": round(segment_offset_seconds + 1.0, 2),
+                            "confidence": 1.0,
+                            "speaker": current_speaker
+                        })
+                    
+                    # [FINAL RESULT]
+                    logging.info(f"✅ Final Result [Speaker {current_speaker}]: {text}")
                     response = {
                         "channel": {
-                            "alternatives": [
-                                {
-                                    "transcript": text,
-                                    "confidence": 1.0,
-                                    "words": words
-                                }
-                            ]
+                            "alternatives": [{
+                                "transcript": text,
+                                "confidence": 1.0,
+                                "speaker": current_speaker, # Top-level speaker field
+                                "words": words # Rich metadata
+                            }]
                         },
                         "is_final": True
                     }
-                    logging.info(f"📝 Kết quả: {text}")
                     await websocket.send(json.dumps(response, ensure_ascii=False))
+                    
+                    # [REMOVED] Always Toggle
+                    # current_speaker = 1 - current_speaker
+                
+                # Reset rolling buffer because we justified finished a sentence
+                rolling_buffer = []  
+                
+            # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
+            # If user speaks continuously for > 15 seconds without silence, FORCE a cut.
+            if len(rolling_buffer) > 240000: # 16000 * 15s
+                 logging.info("⚠️ Forced Segmentation (Long Speech detected)")
+                 stream = recognizer.create_stream()
+                 stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
+                 recognizer.decode_stream(stream)
+                 text = stream.result.text.strip().capitalize()
+                 
+                 if text:
+                    logging.info(f"✅ Final Result (Forced - Speaker {current_speaker}): {text}")
+                    
+                    # Minimal words construction for forced segment (timestamps harder here)
+                    words_forced = [{
+                        "word": text,
+                        "start": 0.0,
+                        "end": 15.0,
+                        "confidence": 1.0,
+                        "speaker": current_speaker
+                    }]
+                    
+                    await websocket.send(json.dumps({
+                        "channel": {"alternatives": [{
+                            "transcript": text, 
+                            "confidence": 1.0,
+                            "words": words_forced
+                        }]},
+                        "is_final": True
+                    }, ensure_ascii=False))
+                    
+                    current_speaker = 1 - current_speaker # Toggle speaker
+                 
+                 rolling_buffer = [] # Clear buffer to start fresh
+                 client_vad.reset() # Reset VAD to avoid carrying over old state
+            
+            # B. PARTIAL DECODE (Visual Feedback)
+            # Only if we have enough data and enough time passed
+            if len(rolling_buffer) > 4000 and (current_time - last_decode_time > DECODE_INTERVAL):
+                # Convert rolling buffer to numpy for decoding
+                # [OPTIMIZATION] Decode FULL buffer (up to 15s max)
+                # We removed the slice limit to prevent "text trimming" (disappearing words).
+                
+                buffer_array = np.array(rolling_buffer, dtype=np.float32)
+                
+                stream = recognizer.create_stream()
+                stream.accept_waveform(16000, buffer_array)
+                recognizer.decode_stream(stream)
+                text = stream.result.text.strip().lower() # lowercase for partial
+                
+                if text:
+                    # [PARTIAL RESULT]
+                    # logging.info(f"Typing... {text}") # Too noisy for logs
+                    response = {
+                        "channel": {
+                            "alternatives": [{
+                                "transcript": text,
+                                "confidence": 0.5,
+                            }]
+                        },
+                        "is_final": False
+                    }
+                    await websocket.send(json.dumps(response, ensure_ascii=False))
+                
+                last_decode_time = current_time
 
     except websockets.exceptions.ConnectionClosed:
         logging.info("🔌 Client đã ngắt kết nối")
@@ -298,8 +394,8 @@ async def handle_connection(websocket):
         logging.error(f"❌ Lỗi connection: {e}")
 
 async def main():
-    server = await websockets.serve(handle_connection, "0.0.0.0", PORT)
-    logging.info(f"🚀 Server (VAD + Offline) đang lắng nghe tại ws://0.0.0.0:{PORT}")
+    server = await websockets.serve(handle_connection, "0.0.0.0", PORT, ping_interval=None)
+    logging.info(f"🚀 Server UPDATED VERSION (Speaker Toggle + Rich Meta) đang lắng nghe tại ws://0.0.0.0:{PORT}")
     await server.wait_closed()
 
 if __name__ == "__main__":
