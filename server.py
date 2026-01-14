@@ -158,8 +158,11 @@ async def handle_connection(websocket):
     # Đa luồng: Tốt nhất nên tạo VAD mới cho mỗi conn hoặc đảm bảo thread-safe.
     # Để an toàn và đơn giản, ta sẽ tạo lại VAD cho mỗi connection hoặc reset.
     # Nhưng VAD load model cũng nhẹ. Ta sẽ init lại config clone từ global hoặc làm mới.
-    
     # RE-INIT VAD for each client to avoid buffer mixing
+    import uuid
+    conn_id = str(uuid.uuid4())[:8]
+    logging.info(f"🔗 [{conn_id}] Client đã kết nối")
+    
     model_dir = "./model_vi"
     vad_model = os.path.join(model_dir, "silero_vad.onnx")
     vad_config = sherpa_onnx.VadModelConfig()
@@ -189,6 +192,37 @@ async def handle_connection(websocket):
     # Track total samples to calculate absolute time across VAD resets
     total_samples_processed = 0 
     vad_start_offset_samples = 0
+
+    # [THREAD SAFETY] Flag to prevent stacking partial decodes
+    is_partial_decoding = False
+    
+    async def run_partial_decode(buffer_copy):
+        nonlocal is_partial_decoding, last_decode_time
+        try:
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(None, decode_buffer_sync, recognizer, buffer_copy)
+            
+            if text:
+                 response = {
+                    "channel": {
+                        "alternatives": [{
+                            "transcript": text,
+                            "confidence": 0.5,
+                        }]
+                    },
+                    "is_final": False
+                }
+                 try:
+                    await websocket.send(json.dumps(response, ensure_ascii=False))
+                 except:
+                     pass # Client might disconnect
+            
+            last_decode_time = asyncio.get_event_loop().time()
+            
+        except Exception as e:
+            logging.error(f"⚠️ Partial Decode Error: {e}")
+        finally:
+            is_partial_decoding = False
 
     try:
         async for message in websocket:
@@ -317,7 +351,7 @@ async def handle_connection(websocket):
                         })
                     
                     # [FINAL RESULT]
-                    logging.info(f"✅ Final Result [Speaker {current_speaker}]: {text}")
+                    logging.info(f"✅ [{conn_id}] Final Result [Speaker {current_speaker}]: {text}")
                     response = {
                         "channel": {
                             "alternatives": [{
@@ -338,19 +372,13 @@ async def handle_connection(websocket):
                 rolling_buffer = []  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
-            # If user speaks continuously for > 10 seconds without silence, FORCE a cut.
-            # Set to 10s as a balanced limit
-            if len(rolling_buffer) > 160000: # 16000 * 10s
-                 logging.info(f"⚠️ Forced Segmentation (Long Speech > 10s)")
+            # If user speaks continuously for > 8 seconds without silence, FORCE a cut.
+            # Set to 8s as a balanced limit
+            if len(rolling_buffer) > 128000: # 16000 * 8s
+                 logging.info(f"⚠️ Forced Segmentation (Long Speech > 8s)")
                  stream = recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
-                 # Use async decode helper here too? 
-                 # Maybe not strictly necessary if we reset immediately, but safer.
-                 # Actually forcing segment is final, so better use sync for simplicity 
-                 # OR reuse decode_buffer_sync if heavy.
-                 # Let's use the standard way for now.
                  recognizer.decode_stream(stream)
-                 
                  # [FIX] Lowercase forced segment
                  text = stream.result.text.strip().lower()
                  
@@ -364,7 +392,7 @@ async def handle_connection(websocket):
                     words_forced = [{
                         "word": text,
                         "start": round(buffer_start_time, 2),
-                        "end": round(buffer_start_time + 10.0, 2),
+                        "end": round(buffer_start_time + 8.0, 2),
                         "confidence": 1.0,
                         "speaker": current_speaker
                     }]
@@ -396,28 +424,15 @@ async def handle_connection(websocket):
             dynamic_interval = max(DECODE_INTERVAL, DECODE_INTERVAL + buffer_duration * 0.05)
             
             if len(rolling_buffer) > 4000 and (current_time - last_decode_time > dynamic_interval):
-                # Convert rolling buffer to numpy for decoding
-                buffer_array = np.array(rolling_buffer, dtype=np.float32)
-                
-                # [ASYNC DECODE] Run in thread to avoid blocking WebSocket loop
-                loop = asyncio.get_running_loop()
-                text = await loop.run_in_executor(None, decode_buffer_sync, recognizer, buffer_array)
-                
-                if text:
-                    # [PARTIAL RESULT]
-                    # logging.info(f"Typing... {text}") # Too noisy for logs
-                    response = {
-                        "channel": {
-                            "alternatives": [{
-                                "transcript": text,
-                                "confidence": 0.5,
-                            }]
-                        },
-                        "is_final": False
-                    }
-                    await websocket.send(json.dumps(response, ensure_ascii=False))
-                
-                last_decode_time = asyncio.get_event_loop().time()
+                if not is_partial_decoding:
+                    # [SAFE ASYNC] Fire-and-forget task
+                    # Copy buffer to ensure thread safety
+                    buffer_copy = np.array(rolling_buffer, dtype=np.float32)
+                    is_partial_decoding = True
+                    asyncio.create_task(run_partial_decode(buffer_copy))
+                else:
+                    # Previous decode still running, skip this frame to prevent stacking
+                    pass
 
     except websockets.exceptions.ConnectionClosed:
         logging.info("🔌 Client đã ngắt kết nối")
