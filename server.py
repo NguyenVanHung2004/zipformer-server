@@ -171,7 +171,7 @@ async def handle_connection(websocket):
     # ⚡ TUNING VAD PARAMETERS
     # Tang threshold len 0.45 de do bi noise lam treo cau
     vad_config.silero_vad.threshold = 0.45         
-    vad_config.silero_vad.min_silence_duration = 0.5
+    vad_config.silero_vad.min_silence_duration = 0.8
     vad_config.silero_vad.min_speech_duration = 0.25 
     
     client_vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=60)
@@ -179,7 +179,7 @@ async def handle_connection(websocket):
     # --- PSEUDO-STREAMING LOGIC ---
     rolling_buffer = [] 
     last_decode_time = 0
-    DECODE_INTERVAL = 1.0 # [TUNING] Reduce to 1.0s for better responsiveness
+    DECODE_INTERVAL = 0.6 # [TUNING] Reduce to 0.2s for better responsiveness
     
     current_sentence_id = 0
     current_speaker = 0 
@@ -324,8 +324,13 @@ async def handle_connection(websocket):
                     # [REMOVED] Always Toggle
                     # current_speaker = 1 - current_speaker
                 
-                # Reset rolling buffer because we justified finished a sentence
-                rolling_buffer = []  
+                # [FIX] Slice rolling buffer instead of clearing to preserve subsequent audio
+                # This prevents "trimming" effect where valid audio is lost between partial and final
+                segment_len = len(speech_segment)
+                if len(rolling_buffer) >= segment_len:
+                    rolling_buffer = rolling_buffer[segment_len:]
+                else:
+                    rolling_buffer = []  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
             # If user speaks continuously for > 10 seconds without silence, FORCE a cut.
