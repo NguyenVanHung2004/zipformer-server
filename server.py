@@ -367,18 +367,19 @@ async def handle_connection(websocket):
                  client_vad.reset()
             
             # B. PARTIAL DECODE (Visual Feedback)
-            # Only if we have enough data and enough time passed
-            if len(rolling_buffer) > 4000 and (current_time - last_decode_time > DECODE_INTERVAL):
+            # [OPTIMIZATION] Dynamic Interval to prevent locking on long sentences
+            # Base = DECODE_INTERVAL (e.g. 0.2s or 0.4s)
+            # Add 0.05s for every second of audio. 10s audio -> +0.5s interval.
+            buffer_duration = len(rolling_buffer) / 16000.0
+            dynamic_interval = max(DECODE_INTERVAL, DECODE_INTERVAL + buffer_duration * 0.05)
+            
+            if len(rolling_buffer) > 4000 and (current_time - last_decode_time > dynamic_interval):
                 # Convert rolling buffer to numpy for decoding
-                # [OPTIMIZATION] Decode FULL buffer (up to 15s max)
-                # We removed the slice limit to prevent "text trimming" (disappearing words).
-                
                 buffer_array = np.array(rolling_buffer, dtype=np.float32)
                 
-                stream = recognizer.create_stream()
-                stream.accept_waveform(16000, buffer_array)
-                recognizer.decode_stream(stream)
-                text = stream.result.text.strip().lower() # lowercase for partial
+                # [ASYNC DECODE] Run in thread to avoid blocking WebSocket loop
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(None, decode_buffer_sync, recognizer, buffer_array)
                 
                 if text:
                     # [PARTIAL RESULT]
@@ -394,16 +395,23 @@ async def handle_connection(websocket):
                     }
                     await websocket.send(json.dumps(response, ensure_ascii=False))
                 
-                last_decode_time = current_time
+                last_decode_time = asyncio.get_event_loop().time()
 
     except websockets.exceptions.ConnectionClosed:
         logging.info("🔌 Client đã ngắt kết nối")
     except Exception as e:
         logging.error(f"❌ Lỗi connection: {e}")
 
+# Helper for threaded decoding
+def decode_buffer_sync(recognizer, buffer_array):
+    stream = recognizer.create_stream()
+    stream.accept_waveform(16000, buffer_array)
+    recognizer.decode_stream(stream)
+    return stream.result.text.strip().lower()
+
 async def main():
     server = await websockets.serve(handle_connection, "0.0.0.0", PORT, ping_interval=None)
-    logging.info(f"🚀 Server UPDATED VERSION (Speaker Toggle + Rich Meta) đang lắng nghe tại ws://0.0.0.0:{PORT}")
+    logging.info(f"🚀 Server UPDATED VERSION (Async Partial Decode) đang lắng nghe tại ws://0.0.0.0:{PORT}")
     await server.wait_closed()
 
 if __name__ == "__main__":
