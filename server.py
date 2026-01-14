@@ -184,11 +184,19 @@ async def handle_connection(websocket):
     current_sentence_id = 0
     current_speaker = 0 
     last_segment_end_time = 0 # Track time to detect long pauses
+    
+    # [TIMESTAMP FIX]
+    # Track total samples to calculate absolute time across VAD resets
+    total_samples_processed = 0 
+    vad_start_offset_samples = 0
 
     try:
         async for message in websocket:
             # message is bytes (audio chunk)
             samples = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            # Update total samples count
+            total_samples_processed += len(samples)
             
             # [SMART GAIN CONTROl]
             # Thay vì nhân 3 cứng nhắc (dễ vỡ tiếng nếu mic gần), ta dùng cơ chế "Normalize" nhẹ
@@ -238,9 +246,11 @@ async def handle_connection(websocket):
                 # VAD usually handles boundaries well enough.
                 
                 # New: Calculate offset for timestamps
+                # [TIMESTAMP FIX] Use global offset + VAD Internal Offset
                 segment_offset_seconds = 0.0
                 if hasattr(client_vad.front, 'start'):
-                     segment_offset_seconds = client_vad.front.start / 16000.0
+                     # client_vad.front.start is relative to when VAD was last reset
+                     segment_offset_seconds = (vad_start_offset_samples + client_vad.front.start) / 16000.0
                 
                 # Decode the Clean Segment
                 stream = recognizer.create_stream()
@@ -334,9 +344,18 @@ async def handle_connection(websocket):
                  logging.info(f"⚠️ Forced Segmentation (Long Speech > 10s)")
                  stream = recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
+                 # Use async decode helper here too? 
+                 # Maybe not strictly necessary if we reset immediately, but safer.
+                 # Actually forcing segment is final, so better use sync for simplicity 
+                 # OR reuse decode_buffer_sync if heavy.
+                 # Let's use the standard way for now.
                  recognizer.decode_stream(stream)
+                 
                  # [FIX] Lowercase forced segment
                  text = stream.result.text.strip().lower()
+                 
+                 # [TIMESTAMP FIX] Calculate Buffer Start Time
+                 buffer_start_time = (total_samples_processed - len(rolling_buffer)) / 16000.0
                  
                  if text:
                     logging.info(f"✅ Final Result (Forced - Speaker {current_speaker}): {text}")
@@ -344,8 +363,8 @@ async def handle_connection(websocket):
                     # Minimal words construction for forced segment (timestamps harder here)
                     words_forced = [{
                         "word": text,
-                        "start": 0.0,
-                        "end": 10.0,
+                        "start": round(buffer_start_time, 2),
+                        "end": round(buffer_start_time + 10.0, 2),
                         "confidence": 1.0,
                         "speaker": current_speaker
                     }]
@@ -365,6 +384,9 @@ async def handle_connection(websocket):
                  # [CRITICAL FIX] Always clear buffer after Forced Segmentation, even if text is empty!
                  rolling_buffer = [] 
                  client_vad.reset()
+                 
+                 # [TIMESTAMP FIX] Update VAD Offset because reset() zeroes internal counter
+                 vad_start_offset_samples = total_samples_processed
             
             # B. PARTIAL DECODE (Visual Feedback)
             # [OPTIMIZATION] Dynamic Interval to prevent locking on long sentences
