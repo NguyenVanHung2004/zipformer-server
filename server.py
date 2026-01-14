@@ -251,11 +251,13 @@ async def handle_connection(websocket):
                 # Reconstruct text properly
                 if hasattr(result, 'tokens'):
                      raw_tokens = result.tokens
-                     reconstructed_text = "".join(raw_tokens).replace('▁', ' ').strip()
+                     # [FIX] Lowercase để đồng bộ
+                     reconstructed_text = "".join(raw_tokens).replace('▁', ' ').strip().lower()
                      import re
-                     text = re.sub(r'\s+', ' ', reconstructed_text).capitalize()
+                     # Chỉ để raw text là chữ thường, Frontend tự lo viết hoa
+                     text = re.sub(r'\s+', ' ', reconstructed_text)
                 else:
-                     text = result.text.strip().capitalize()
+                     text = result.text.strip().lower()
                 
                 if text:
                     # [SMART PARAGRAPHING] Toggle Speaker ONLY on long pause (> 2.0s)
@@ -284,7 +286,8 @@ async def handle_connection(websocket):
                                  next_absolute = segment_offset_seconds + next_local # Removed prepend_duration
                                  end = next_absolute
                              
-                             clean_word = token.replace('▁', '').strip()
+                             # [FIX] Lower clean_word
+                             clean_word = token.replace('▁', '').strip().lower()
                              words.append({
                                  "word": clean_word,
                                  "start": round(start, 2),
@@ -332,7 +335,8 @@ async def handle_connection(websocket):
                  stream = recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
                  recognizer.decode_stream(stream)
-                 text = stream.result.text.strip().capitalize()
+                 # [FIX] Lowercase forced segment
+                 text = stream.result.text.strip().lower()
                  
                  if text:
                     logging.info(f"✅ Final Result (Forced - Speaker {current_speaker}): {text}")
