@@ -171,7 +171,7 @@ async def handle_connection(websocket):
     # ⚡ TUNING VAD PARAMETERS
     # Tang threshold len 0.45 de do bi noise lam treo cau
     vad_config.silero_vad.threshold = 0.45         
-    vad_config.silero_vad.min_silence_duration = 0.8
+    vad_config.silero_vad.min_silence_duration = 0.5
     vad_config.silero_vad.min_speech_duration = 0.25 
     
     client_vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=60)
@@ -196,29 +196,29 @@ async def handle_connection(websocket):
             
             max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
             
-            # [NOISE GATE LOGIC UPDATED]
-            # We must ALWAYS append to rolling_buffer to keep time alignment (1s audio = 16000 samples).
-            # Otherwise, forced segmentation and buffer slicing will be De-synced.
-            
-            if max_amp > 0 and max_amp < 0.3: # Only boost if small but not zero
-                target_gain = 0.5 / max_amp 
-                perform_gain = min(target_gain, 4.0) 
-                samples = samples * perform_gain
-            
-            samples = np.clip(samples, -1.0, 1.0)
-            
-            # Additional: If extremely quiet (<0.01), maybe mute to avoid static?
-            # But let's keep it simple first.
-            if max_amp < 0.01:
-                # Optionally mute very low noise but KEEP samples
-                # samples = samples * 0.1 
-                pass
-
-            # 1. Add to rolling buffer (for partial results)
-            rolling_buffer.extend(samples)
-            
-            # 2. Feed to VAD (for final decision)
-            client_vad.accept_waveform(samples)
+            # [NOISE GATE] Prevent amplifying silence/noise
+            # If signal is too weak (< 0.03), treat as silence/noise to ignore.
+            if max_amp < 0.03:
+                # Still feed to VAD so it can detect silence duration (End of Speech)
+                client_vad.accept_waveform(samples)
+                # But DO NOT accumulate to buffers (prevents Forced Segmentation on noise)
+                # And DO NOT boost gain (amplifying noise causes "Ừ" "Ờ" output)
+                pass 
+            else:
+                if max_amp > 0 and max_amp < 0.3: # Chỉ boost nếu âm thanh thực sự nhỏ
+                    target_gain = 0.5 / max_amp # Target mức 0.5 (an toàn)
+                    # Giới hạn Gain không quá 5 lần để tránh noise floor bị rồ lên
+                    perform_gain = min(target_gain, 4.0) 
+                    samples = samples * perform_gain
+                
+                # Clip an toàn
+                samples = np.clip(samples, -1.0, 1.0)
+                
+                # 1. Add to rolling buffer (for partial results)
+                rolling_buffer.extend(samples)
+                
+                # 2. Feed to VAD (for final decision)
+                client_vad.accept_waveform(samples)
             
             # [DEBUG] Track buffer size to ensure it's growing
             if len(rolling_buffer) % 16000 < len(samples): 
@@ -324,13 +324,8 @@ async def handle_connection(websocket):
                     # [REMOVED] Always Toggle
                     # current_speaker = 1 - current_speaker
                 
-                # [FIX] Slice rolling buffer instead of clearing to preserve subsequent audio
-                # This prevents "trimming" effect where valid audio is lost between partial and final
-                segment_len = len(speech_segment)
-                if len(rolling_buffer) >= segment_len:
-                    rolling_buffer = rolling_buffer[segment_len:]
-                else:
-                    rolling_buffer = []  
+                # Reset rolling buffer because we justified finished a sentence
+                rolling_buffer = []  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
             # If user speaks continuously for > 10 seconds without silence, FORCE a cut.
