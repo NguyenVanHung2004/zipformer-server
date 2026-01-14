@@ -179,7 +179,7 @@ async def handle_connection(websocket):
     # --- PSEUDO-STREAMING LOGIC ---
     rolling_buffer = [] 
     last_decode_time = 0
-    DECODE_INTERVAL = 0.6 # [TUNING] Reduce to 0.2s for better responsiveness
+    DECODE_INTERVAL = 0.4 # [TUNING] Reduce to 0.2s for better responsiveness
     
     current_sentence_id = 0
     current_speaker = 0 
@@ -196,29 +196,29 @@ async def handle_connection(websocket):
             
             max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
             
-            # [NOISE GATE] Prevent amplifying silence/noise
-            # If signal is too weak (< 0.03), treat as silence/noise to ignore.
-            if max_amp < 0.03:
-                # Still feed to VAD so it can detect silence duration (End of Speech)
-                client_vad.accept_waveform(samples)
-                # But DO NOT accumulate to buffers (prevents Forced Segmentation on noise)
-                # And DO NOT boost gain (amplifying noise causes "Ừ" "Ờ" output)
-                pass 
-            else:
-                if max_amp > 0 and max_amp < 0.3: # Chỉ boost nếu âm thanh thực sự nhỏ
-                    target_gain = 0.5 / max_amp # Target mức 0.5 (an toàn)
-                    # Giới hạn Gain không quá 5 lần để tránh noise floor bị rồ lên
-                    perform_gain = min(target_gain, 4.0) 
-                    samples = samples * perform_gain
-                
-                # Clip an toàn
-                samples = np.clip(samples, -1.0, 1.0)
-                
-                # 1. Add to rolling buffer (for partial results)
-                rolling_buffer.extend(samples)
-                
-                # 2. Feed to VAD (for final decision)
-                client_vad.accept_waveform(samples)
+            # [NOISE GATE LOGIC UPDATED]
+            # We must ALWAYS append to rolling_buffer to keep time alignment (1s audio = 16000 samples).
+            # Otherwise, forced segmentation and buffer slicing will be De-synced.
+            
+            if max_amp > 0 and max_amp < 0.3: # Only boost if small but not zero
+                target_gain = 0.5 / max_amp 
+                perform_gain = min(target_gain, 4.0) 
+                samples = samples * perform_gain
+            
+            samples = np.clip(samples, -1.0, 1.0)
+            
+            # Additional: If extremely quiet (<0.01), maybe mute to avoid static?
+            # But let's keep it simple first.
+            if max_amp < 0.01:
+                # Optionally mute very low noise but KEEP samples
+                # samples = samples * 0.1 
+                pass
+
+            # 1. Add to rolling buffer (for partial results)
+            rolling_buffer.extend(samples)
+            
+            # 2. Feed to VAD (for final decision)
+            client_vad.accept_waveform(samples)
             
             # [DEBUG] Track buffer size to ensure it's growing
             if len(rolling_buffer) % 16000 < len(samples): 
