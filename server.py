@@ -121,7 +121,7 @@ def create_components():
         encoder=encoder_path,
         decoder=decoder_path,
         joiner=joiner_path,
-        num_threads=4,
+        num_threads=2,
         sample_rate=16000,
         feature_dim=80,
         decoding_method="greedy_search",
@@ -448,6 +448,7 @@ async def handle_connection(websocket):
                  
                  # [CRITICAL FIX] Always clear buffer after Forced Segmentation, even if text is empty!
                  rolling_buffer = []
+
                  current_sentence_id += 1 # New sequence 
                  client_vad.reset()
                  
