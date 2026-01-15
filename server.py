@@ -196,11 +196,19 @@ async def handle_connection(websocket):
     # [THREAD SAFETY] Flag to prevent stacking partial decodes
     is_partial_decoding = False
     
-    async def run_partial_decode(buffer_copy):
-        nonlocal is_partial_decoding, last_decode_time
+    async def run_partial_decode(buffer_copy, sentence_id):
+        nonlocal is_partial_decoding, last_decode_time, current_sentence_id
         try:
+            # [Fix Race Condition] Check if sentence sequence has moved on
+            if sentence_id != current_sentence_id:
+                return
+
             loop = asyncio.get_running_loop()
             text = await loop.run_in_executor(None, decode_buffer_sync, recognizer, buffer_copy)
+            
+            # [Fix Race Condition] Double check before sending
+            if sentence_id != current_sentence_id:
+                return
             
             if text:
                  response = {
@@ -369,7 +377,8 @@ async def handle_connection(websocket):
                     # current_speaker = 1 - current_speaker
                 
                 # Reset rolling buffer because we justified finished a sentence
-                rolling_buffer = []  
+                rolling_buffer = [] 
+                current_sentence_id += 1 # New sequence  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
             # If user speaks continuously for > 8 seconds without silence, FORCE a cut.
@@ -410,7 +419,8 @@ async def handle_connection(websocket):
                     current_speaker = 1 - current_speaker # Toggle speaker
                  
                  # [CRITICAL FIX] Always clear buffer after Forced Segmentation, even if text is empty!
-                 rolling_buffer = [] 
+                 rolling_buffer = []
+                 current_sentence_id += 1 # New sequence 
                  client_vad.reset()
                  
                  # [TIMESTAMP FIX] Update VAD Offset because reset() zeroes internal counter
@@ -429,7 +439,8 @@ async def handle_connection(websocket):
                     # Copy buffer to ensure thread safety
                     buffer_copy = np.array(rolling_buffer, dtype=np.float32)
                     is_partial_decoding = True
-                    asyncio.create_task(run_partial_decode(buffer_copy))
+                    # Pass sequence ID to ensure we don't send stale partials after final
+                    asyncio.create_task(run_partial_decode(buffer_copy, current_sentence_id))
                 else:
                     # Previous decode still running, skip this frame to prevent stacking
                     pass
