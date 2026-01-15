@@ -376,8 +376,13 @@ async def handle_connection(websocket):
                     # [REMOVED] Always Toggle
                     # current_speaker = 1 - current_speaker
                 
-                # Reset rolling buffer because we justified finished a sentence
-                rolling_buffer = [] 
+                # [FIX CONTEXT] Keep last 0.5s (8000 samples) for overlap/context
+                # This prevents "Hard Cut" issues where the start of next word is lost
+                if len(rolling_buffer) > 8000:
+                    rolling_buffer = rolling_buffer[-8000:]
+                else:
+                    rolling_buffer = [] # Or keep all if < 0.5s
+                
                 current_sentence_id += 1 # New sequence  
                 
             # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
