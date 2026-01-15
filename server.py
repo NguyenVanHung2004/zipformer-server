@@ -376,12 +376,8 @@ async def handle_connection(websocket):
                     # [REMOVED] Always Toggle
                     # current_speaker = 1 - current_speaker
                 
-                # [FIX CONTEXT] Keep last 0.5s (8000 samples) for overlap/context
-                # This prevents "Hard Cut" issues where the start of next word is lost
-                if len(rolling_buffer) > 8000:
-                    rolling_buffer = rolling_buffer[-8000:]
-                else:
-                    rolling_buffer = [] # Or keep all if < 0.5s
+                # Reset rolling buffer because we justified finished a sentence
+                rolling_buffer = [] 
                 
                 current_sentence_id += 1 # New sequence  
                 
@@ -402,14 +398,41 @@ async def handle_connection(websocket):
                  if text:
                     logging.info(f"✅ Final Result (Forced - Speaker {current_speaker}): {text}")
                     
-                    # Minimal words construction for forced segment (timestamps harder here)
-                    words_forced = [{
-                        "word": text,
-                        "start": round(buffer_start_time, 2),
-                        "end": round(buffer_start_time + 8.0, 2),
-                        "confidence": 1.0,
-                        "speaker": current_speaker
-                    }]
+                    # [FEATURE] Word-level Timestamps for Forced Segment
+                    words_forced = []
+                    result = stream.result
+                    
+                    if hasattr(result, 'tokens') and hasattr(result, 'timestamps'):
+                        for i, token in enumerate(result.tokens):
+                             local_start = result.timestamps[i]
+                             absolute_start = buffer_start_time + local_start
+                             
+                             start = absolute_start
+                             end = start + 0.1
+                             
+                             if i < len(result.timestamps) - 1:
+                                 next_local = result.timestamps[i+1]
+                                 next_absolute = buffer_start_time + next_local
+                                 end = next_absolute
+                             
+                             clean_word = token.replace('▁', '').strip().lower()
+                             words_forced.append({
+                                 "word": clean_word,
+                                 "start": round(start, 2),
+                                 "end": round(end, 2),
+                                 "confidence": 1.0,
+                                 "speaker": current_speaker
+                             })
+
+                    # Fallback if no tokens
+                    if not words_forced:
+                        words_forced = [{
+                            "word": text,
+                            "start": round(buffer_start_time, 2),
+                            "end": round(buffer_start_time + 8.0, 2),
+                            "confidence": 1.0,
+                            "speaker": current_speaker
+                        }]
                     
                     await websocket.send(json.dumps({
                         "channel": {"alternatives": [{
