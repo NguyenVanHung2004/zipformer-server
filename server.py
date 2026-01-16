@@ -341,24 +341,21 @@ async def handle_connection(websocket):
                 
                 current_sentence_id += 1  
                 
-            # [CRITICAL FEATURE] C. FORCED SEGMENTATION (Prevent Freezing on Long Speech)
-            # If user speaks continuously for > 8 seconds without silence, FORCE a cut.
-            # Set to 8s as a balanced limit
-            if len(rolling_buffer) > 128000: # 16000 * 8s
-                 logging.info(f"⚠️ Forced Segmentation (Long Speech > 8s)")
+            # [EXPERIMENTAL] PERIODIC 1.5s CHUNKING (No Trim Text)
+            # Threshold: 24000 samples = 1.5 seconds
+            # This replaces "Forced Segmentation" as the MAIN logic.
+            if len(rolling_buffer) > 24000: 
+                 logging.info(f"⚡ Periodic Chunk (1.5s)")
                  stream = recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
                  recognizer.decode_stream(stream)
-                 # [FIX] Lowercase forced segment
                  text = stream.result.text.strip().lower()
                  
-                 # [TIMESTAMP FIX] Calculate Buffer Start Time
                  buffer_start_time = (total_samples_processed - len(rolling_buffer)) / 16000.0
                  
                  if text:
-                    logging.info(f"✅ Final Result (Forced - Speaker {current_speaker}): {text}")
+                    logging.info(f"✅ Final Result (Chunk - Speaker {current_speaker}): {text}")
                     
-                    # [FEATURE] Word-level Timestamps for Forced Segment
                     words_forced = []
                     result = stream.result
                     
@@ -384,12 +381,11 @@ async def handle_connection(websocket):
                                  "speaker": current_speaker
                              })
 
-                    # Fallback if no tokens
                     if not words_forced:
                         words_forced = [{
                             "word": text,
                             "start": round(buffer_start_time, 2),
-                            "end": round(buffer_start_time + 8.0, 2),
+                            "end": round(buffer_start_time + 1.5, 2),
                             "confidence": 1.0,
                             "speaker": current_speaker
                         }]
@@ -398,41 +394,29 @@ async def handle_connection(websocket):
                         "channel": {"alternatives": [{
                             "transcript": text, 
                             "confidence": 1.0,
-                            "speaker": current_speaker, # Added top-level consistency
+                            "speaker": current_speaker, 
                             "words": words_forced
                         }]},
                         "is_final": True
                     }, ensure_ascii=False))
                     
-                    current_speaker = 1 - current_speaker # Toggle speaker
+                    # current_speaker = 1 - current_speaker # Don't toggle on chunks
                  
-                 # [CRITICAL FIX] Always clear buffer after Forced Segmentation, even if text is empty!
-                 rolling_buffer = []
+                 # Soft Buffer Clear (Keep last 0.25s)
+                 if len(rolling_buffer) > 4000:
+                    rolling_buffer = rolling_buffer[-4000:]
+                 else:
+                    rolling_buffer = []
 
-                 current_sentence_id += 1 # New sequence 
+                 current_sentence_id += 1 
                  client_vad.reset()
-                 
-                 # [TIMESTAMP FIX] Update VAD Offset because reset() zeroes internal counter
                  vad_start_offset_samples = total_samples_processed
             
-            # B. PARTIAL DECODE (Visual Feedback)
-            # [OPTIMIZATION] Dynamic Interval to prevent locking on long sentences
-            # Base = DECODE_INTERVAL (e.g. 0.2s or 0.4s)
-            # Add 0.05s for every second of audio. 10s audio -> +0.5s interval.
-            buffer_duration = len(rolling_buffer) / 16000.0
-            dynamic_interval = max(DECODE_INTERVAL, DECODE_INTERVAL + buffer_duration * 0.05)
-            
-            if len(rolling_buffer) > 4000 and (current_time - last_decode_time > dynamic_interval):
-                if not is_partial_decoding:
-                    # [SAFE ASYNC] Fire-and-forget task
-                    # Copy buffer to ensure thread safety
-                    buffer_copy = np.array(rolling_buffer, dtype=np.float32)
-                    is_partial_decoding = True
-                    # Pass sequence ID to ensure we don't send stale partials after final
-                    asyncio.create_task(run_partial_decode(buffer_copy, current_sentence_id))
-                else:
-                    # Previous decode still running, skip this frame to prevent stacking
-                    pass
+            # B. PARTIAL DECODE (DISABLED)
+            # buffer_duration = len(rolling_buffer) / 16000.0
+            # dynamic_interval = max(DECODE_INTERVAL, DECODE_INTERVAL + buffer_duration * 0.05)
+            # if len(rolling_buffer) > 4000 and (current_time - last_decode_time > dynamic_interval):
+            #    pass # Disabled for CPU optimization
 
     except websockets.exceptions.ConnectionClosed:
         logging.info("🔌 Client đã ngắt kết nối")
