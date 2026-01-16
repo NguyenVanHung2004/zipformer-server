@@ -124,7 +124,8 @@ def create_components():
         num_threads=2,
         sample_rate=16000,
         feature_dim=80,
-        decoding_method="greedy_search",
+        decoding_method="modified_beam_search",
+        max_active_paths=4,
     )
     
     logging.info("⏳ Đang tải VAD...")
