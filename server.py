@@ -404,7 +404,7 @@ async def handle_connection(websocket):
                         "is_final": True
                     }, ensure_ascii=False))
                     
-                    current_speaker = 1 - current_speaker # Toggle speaker
+                    # current_speaker = 1 - current_speaker # [Logic Update] Don't toggle on forced cut. Same speaker is talking.
                  
                  # [CRITICAL FIX] Always clear buffer after Forced Segmentation, even if text is empty!
                  rolling_buffer = []
