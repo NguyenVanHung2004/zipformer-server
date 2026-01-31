@@ -148,6 +148,52 @@ def create_components():
     logging.info("✅ Hệ thống đã sẵn sàng!")
     return recognizer, vad
 
+import scipy.signal
+
+# --- AUDIO PREPROCESSING (DSP) ---
+class AudioPreprocessor:
+    def __init__(self, sample_rate=16000):
+        self.sample_rate = sample_rate
+        
+        # 1. Bandpass Filter (80Hz - 3400Hz)
+        # Loại bỏ tiếng ù (hum) < 80Hz và nhiễu cao tần > 3400Hz (Human Voice Range)
+        nyquist = 0.5 * sample_rate
+        low = 80.0 / nyquist
+        high = 3400.0 / nyquist
+        self.b, self.a = scipy.signal.butter(5, [low, high], btype='band')
+        self.zi = scipy.signal.lfilter_zi(self.b, self.a)
+        
+        # 2. AGC (Automatic Gain Control)
+        self.gain = 1.0
+        self.target_level = 0.1  # Target RMS ~ -20dB
+        self.max_gain = 15.0     # Max gain boost
+        self.alpha = 0.01        # Smoothing factor (Attack/Decay)
+
+    def process(self, chunk):
+        # 1. Apply Bandpass Filter
+        filtered_chunk, self.zi = scipy.signal.lfilter(self.b, self.a, chunk, zi=self.zi)
+        
+        # 2. Apply AGC
+        # Calculate RMS of ANY signal (even silence needs gain tracking)
+        rms = np.sqrt(np.mean(filtered_chunk**2)) + 1e-6
+        
+        # Simple Feedback AGC
+        if rms > 0.001: # Update gain only if there is *some* signal
+            current_target_gain = self.target_level / rms
+            # Smoothly transition gain
+            self.gain = (1 - self.alpha) * self.gain + self.alpha * current_target_gain
+            
+        # Clamp gain
+        self.gain = min(max(self.gain, 0.1), self.max_gain)
+        
+        # Apply Gain
+        normalized_chunk = filtered_chunk * self.gain
+        
+        # Soft Clipping (tanh limit) to prevent distortion
+        normalized_chunk = np.tanh(normalized_chunk)
+        
+        return normalized_chunk
+
 recognizer, vad = create_components()
 
 async def handle_connection(websocket):
@@ -228,19 +274,24 @@ async def handle_connection(websocket):
         finally:
             is_partial_decoding = False
 
+    # --- PREPROCESSOR ---
+    preprocessor = AudioPreprocessor(sample_rate=16000)
+
     try:
         async for message in websocket:
             samples = np.frombuffer(message, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            # [DSP] Apply Filter & AGC
+            samples = preprocessor.process(samples)
+
             total_samples_processed += len(samples)
             
-            max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
+            # max_amp calculation is now on processed samples
+            # max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
             
-            # [REMOVED NOISE GATE] Xử lý mọi âm thanh để không mất dữ liệu "đuôi" câu
-            if max_amp > 0 and max_amp < 0.3: 
-                target_gain = 0.5 / max_amp 
-                perform_gain = min(target_gain, 4.0) 
-                samples = samples * perform_gain
+            # [REMOVED OLD GAIN LOGIC] AGC is now handled by preprocessor class
             
+            # Clip is handled by tanh in preprocessor, but safe to clamp again
             samples = np.clip(samples, -1.0, 1.0)
             
             # 1. Luôn thêm vào buffer (để Partial & Final giống hệt nhau)
