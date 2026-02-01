@@ -10,6 +10,7 @@ from collections import deque
 import glob
 import urllib.request
 import tarfile
+import re
 import shutil
 
 # --- AUTO-DOWNLOAD MODELS (Robust Version) ---
@@ -35,7 +36,9 @@ def download_file(url, target_path, min_size=1024):
 
 def check_and_download_models():
     # 1. Define URLs
-    asr_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-2025-04-20.tar.bz2"
+    # [OPTIMIZATION] Use INT8 Quantized model (Smaller, Faster on CPU)
+    asr_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-int8-2025-04-20.tar.bz2"
+    
     # Alternative Mirror for VAD if GitHub fails
     vad_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
     
@@ -48,8 +51,17 @@ def check_and_download_models():
             print("⚠️ Retrying with mirror...")
             download_file("https://huggingface.co/csukuangfj/silero-vad-onnx/resolve/main/silero_vad.onnx", "model_vi/silero_vad.onnx")
 
-    # 3. Check & Download ASR
-    if not glob.glob("model_vi/encoder-*.onnx"):
+    # 3. Check & Download ASR (INT8)
+    # Check for INT8 specific files to avoid using old FP32 models
+    if not glob.glob("model_vi/*int8.onnx"):
+        print("⚡ Old/Missing model detected. Downloading INT8 Zipformer...")
+        
+        # Cleanup old ONNX files (except VAD) to avoid mix-ups
+        for f in glob.glob("model_vi/*.onnx"):
+            if "silero_vad" not in f:
+                try: os.remove(f) 
+                except: pass
+
         filename = "asr_model.tar.bz2"
         if download_file(asr_url, filename):
             print("📦 Extracting ASR...")
@@ -57,20 +69,23 @@ def check_and_download_models():
                 with tarfile.open(filename, "r:bz2") as tar:
                     tar.extractall(".")
                 
-                extracted_dir = "sherpa-onnx-zipformer-vi-2025-04-20"
+                # Folder name usually matches tarball name (extracted directory)
+                extracted_dir = "sherpa-onnx-zipformer-vi-int8-2025-04-20"
                 if os.path.exists(extracted_dir):
                     os.makedirs("model_vi", exist_ok=True) 
                     
-                    # Delete existing .onnx files in model_vi (EXCEPT VAD)
-                    for f in glob.glob("model_vi/*.onnx"):
-                        if "silero_vad" not in f:
-                            os.remove(f)
-                    
                     for f in os.listdir(extracted_dir):
-                        shutil.move(os.path.join(extracted_dir, f), "model_vi")
+                        src = os.path.join(extracted_dir, f)
+                        dst = os.path.join("model_vi", f)
+                        if os.path.exists(dst):
+                            if os.path.isdir(dst):
+                                shutil.rmtree(dst)
+                            else:
+                                os.remove(dst)
+                        shutil.move(src, dst)
                     os.rmdir(extracted_dir)
                 
-                print("✅ ASR Model Ready")
+                print("✅ INT8 ASR Model Ready")
             except Exception as e:
                 print(f"❌ Extraction Failed: {e}")
             finally:
@@ -155,10 +170,10 @@ class AudioPreprocessor:
     def __init__(self, sample_rate=16000):
         self.sample_rate = sample_rate
         
-        # 1. Bandpass Filter (80Hz - 3400Hz)
-        # Loại bỏ tiếng ù (hum) < 80Hz và nhiễu cao tần > 3400Hz (Human Voice Range)
+        # 1. Bandpass Filter (150Hz - 3400Hz)
+        # Loại bỏ tiếng ù (hum) và tiếng quạt (thường < 150Hz)
         nyquist = 0.5 * sample_rate
-        low = 80.0 / nyquist
+        low = 150.0 / nyquist # Increased from 80Hz to 150Hz to cut fan noise
         high = 3400.0 / nyquist
         self.b, self.a = scipy.signal.butter(5, [low, high], btype='band')
         self.zi = scipy.signal.lfilter_zi(self.b, self.a)
@@ -166,7 +181,7 @@ class AudioPreprocessor:
         # 2. AGC (Automatic Gain Control)
         self.gain = 1.0
         self.target_level = 0.1  # Target RMS ~ -20dB
-        self.max_gain = 15.0     # Max gain boost
+        self.max_gain = 10.0     # Reduced max gain from 15.0 to 10.0 to avoid boosting noise
         self.alpha = 0.01        # Smoothing factor (Attack/Decay)
 
     def process(self, chunk):
@@ -174,13 +189,12 @@ class AudioPreprocessor:
         filtered_chunk, self.zi = scipy.signal.lfilter(self.b, self.a, chunk, zi=self.zi)
         
         # 2. Apply AGC
-        # Calculate RMS of ANY signal (even silence needs gain tracking)
+        # [NOISE GATE FOR AGC] Ignore mostly silent chunks for gain calculation
+        # If RMS is too low (noise floor), don't boost gain
         rms = np.sqrt(np.mean(filtered_chunk**2)) + 1e-6
         
-        # Simple Feedback AGC
-        if rms > 0.001: # Update gain only if there is *some* signal
+        if rms > 0.003: # Only adapt gain if signal is significant (above fan noise)
             current_target_gain = self.target_level / rms
-            # Smoothly transition gain
             self.gain = (1 - self.alpha) * self.gain + self.alpha * current_target_gain
             
         # Clamp gain
@@ -199,13 +213,7 @@ recognizer, vad = create_components()
 async def handle_connection(websocket):
     logging.info("🔗 Client đã kết nối")
     
-    # Mỗi client cần một instance VAD riêng biệt nếu muốn stateful chính xác, 
-    # nhưng sherpa_onnx.VoiceActivityDetector có vẻ giữ state buffer. 
-    # Tuy nhiên, doc mẫu chỉ dùng 1 global vad nếu đơn luồng. 
-    # Đa luồng: Tốt nhất nên tạo VAD mới cho mỗi conn hoặc đảm bảo thread-safe.
-    # Để an toàn và đơn giản, ta sẽ tạo lại VAD cho mỗi connection hoặc reset.
-    # Nhưng VAD load model cũng nhẹ. Ta sẽ init lại config clone từ global hoặc làm mới.
-    # RE-INIT VAD for each client to avoid buffer mixing
+    # ... (VAD Init Code) ...
     import uuid
     conn_id = str(uuid.uuid4())[:8]
     logging.info(f"🔗 [{conn_id}] Client đã kết nối")
@@ -216,12 +224,12 @@ async def handle_connection(websocket):
     vad_config.silero_vad.model = vad_model
     vad_config.sample_rate = 16000
     
-    # ⚡ TUNING VAD PARAMETERS (SENSITIVITY BOOST)
-    # Threshold 0.35: Nhạy hơn để bắt giọng nói nhỏ -> Buffer sẽ chứa đủ âm thanh
-    # Silence 1.0s: Chờ lâu hơn để chắc chắn hết câu -> Tránh cắt giữa chừng
-    vad_config.silero_vad.threshold = 0.35
-    vad_config.silero_vad.min_silence_duration = 1.0
-    vad_config.silero_vad.min_speech_duration = 0.1 
+    # ⚡ TUNING VAD PARAMETERS (NOISE REJECTION)
+    # Threshold 0.55: Cứng hơn để bỏ qua tiếng quạt (Fan Noise)
+    # Speech duration 0.2: Tránh bắt các xung noise ngắn
+    vad_config.silero_vad.threshold = 0.55 # Increased from 0.35
+    vad_config.silero_vad.min_silence_duration = 0.8 # Slightly faster cutoff
+    vad_config.silero_vad.min_speech_duration = 0.25 
     
     client_vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=60)
     
@@ -253,15 +261,21 @@ async def handle_connection(websocket):
                 return
             
             if text:
-                 response = {
-                    "channel": {
-                        "alternatives": [{
-                            "transcript": text,
-                            "confidence": 0.5,
-                        }]
-                    },
-                    "is_final": False
-                }
+                 # [FILTER] Apply same filter to Partial Results (Trim Text)
+                 text = re.sub(r'\b(ừ|à|ờ|um|uh)(\s+\1)+\b', '', text)
+                 if re.fullmatch(r'^(ừ|à|ờ|um|uh)+$', text): 
+                    text = ""
+                    
+                 if text: # Check again after filtering
+                     response = {
+                        "channel": {
+                            "alternatives": [{
+                                "transcript": text,
+                                "confidence": 0.5,
+                            }]
+                        },
+                        "is_final": False
+                    }
                  try:
                     await websocket.send(json.dumps(response, ensure_ascii=False))
                  except:
@@ -322,7 +336,16 @@ async def handle_connection(websocket):
                     recognizer.decode_stream(stream)
                     result = stream.result
                     
+
+                    # [FILTER] Remove common hallucinations (ừ, à, ờ repeated)
                     text = result.text.strip().lower()
+                    
+                    # Remove multiple ừ/à/ờ (e.g., "ừ ừ ừ" -> "")
+                    # Regex: \b(ừ|à|ờ)(\s+\1)+\b matches repeated sequences like "ừ ừ"
+                    text = re.sub(r'\b(ừ|à|ờ|um|uh)(\s+\1)+\b', '', text)
+                    # Remove isolated filler words if they are the ONLY content (noise hallucination)
+                    if re.fullmatch(r'^(ừ|à|ờ|um|uh)+$', text): 
+                        text = ""
                     
                     # [TIMESTAMP FIX] Tính thời gian bắt đầu dựa trên tổng sample trôi qua
                     # buffer_start_time = Hiện tại - Độ dài buffer
@@ -402,6 +425,14 @@ async def handle_connection(websocket):
                  recognizer.decode_stream(stream)
                  # [FIX] Lowercase forced segment
                  text = stream.result.text.strip().lower()
+                 
+
+                 # [FILTER] Remove common hallucinations (Same as VAD block)
+                 # Regex: \b(ừ|à|ờ)(\s+\1)+\b matches repeated sequences like "ừ ừ"
+                 text = re.sub(r'\b(ừ|à|ờ|um|uh)(\s+\1)+\b', '', text)
+                 # Remove isolated filler words if they are the ONLY content (noise hallucination)
+                 if re.fullmatch(r'^(ừ|à|ờ|um|uh)+$', text): 
+                    text = ""
                  
                  # [TIMESTAMP FIX] Calculate Buffer Start Time
                  buffer_start_time = (total_samples_processed - len(rolling_buffer)) / 16000.0
