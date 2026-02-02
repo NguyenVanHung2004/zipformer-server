@@ -130,6 +130,10 @@ def create_components():
         logging.error(f"Contents of {model_dir}: {os.listdir(model_dir)}")
         sys.exit(1)
 
+    hotwords_file = "hotwords.txt" if os.path.exists("hotwords.txt") else ""
+    if hotwords_file:
+        logging.info(f"🔥 Đã phát hiện hotwords: {hotwords_file}")
+
     logging.info("⏳ Đang tải Offline Recognizer...")
     recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
         tokens=tokens_path,
@@ -141,6 +145,8 @@ def create_components():
         feature_dim=80,
         decoding_method="modified_beam_search",
         max_active_paths=4,
+        hotwords_file=hotwords_file,
+        hotwords_score=10.0, # Boosted from 2.0 to 10.0 to force recognition
     )
     
     logging.info("⏳ Đang tải VAD...")
