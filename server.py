@@ -94,6 +94,51 @@ def check_and_download_models():
 # Run check immediately
 check_and_download_models()
 
+def check_and_download_en_models():
+    """Download English Zipformer model (GigaSpeech) into model_en/."""
+    asr_en_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-gigaspeech-2023-12-12.tar.bz2"
+    en_model_dir = "model_en"
+    os.makedirs(en_model_dir, exist_ok=True)
+
+    # 1. Copy shared VAD from model_vi if already downloaded
+    vad_src = "model_vi/silero_vad.onnx"
+    vad_dst = os.path.join(en_model_dir, "silero_vad.onnx")
+    if os.path.exists(vad_src) and not os.path.exists(vad_dst):
+        shutil.copy2(vad_src, vad_dst)
+        print("✅ Copied silero_vad.onnx to model_en/")
+
+    # 2. Check & Download English ASR
+    if not glob.glob(os.path.join(en_model_dir, "encoder-*.onnx")):
+        filename = "asr_model_en.tar.bz2"
+        if download_file(asr_en_url, filename):
+            print("📦 Extracting English Zipformer ASR...")
+            try:
+                with tarfile.open(filename, "r:bz2") as tar:
+                    tar.extractall(".")
+
+                extracted_dir = "sherpa-onnx-zipformer-gigaspeech-2023-12-12"
+                if os.path.exists(extracted_dir):
+                    # Clean old onnx except VAD
+                    for f in glob.glob(os.path.join(en_model_dir, "*.onnx")):
+                        if "silero_vad" not in f:
+                            os.remove(f)
+                    # Move new files
+                    for f in os.listdir(extracted_dir):
+                        shutil.move(os.path.join(extracted_dir, f), en_model_dir)
+                    os.rmdir(extracted_dir)
+                print("✅ English Zipformer ASR Model Ready")
+            except Exception as e:
+                print(f"❌ English ASR Extraction Failed: {e}")
+            finally:
+                if os.path.exists(filename): os.remove(filename)
+        else:
+            print("⚠️ English ASR model download failed. English transcription will be unavailable.")
+    else:
+        print("✅ English Zipformer model already present.")
+
+# Run En check
+check_and_download_en_models()
+
 
 
 # --- CONFIGURATION ---
@@ -102,72 +147,59 @@ PORT = int(os.environ.get("PORT", 6006))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def create_components():
-    model_dir = "./model_vi"
+    # --- Vietnamese Recognizer ---
+    model_dir_vi = "./model_vi"
+    tokens_vi = os.path.join(model_dir_vi, "tokens.txt")
+    encoder_vi = glob.glob(os.path.join(model_dir_vi, "encoder-*.onnx"))[0]
+    decoder_vi = glob.glob(os.path.join(model_dir_vi, "decoder-*.onnx"))[0]
+    joiner_vi = glob.glob(os.path.join(model_dir_vi, "joiner-*.onnx"))[0]
     
-    # Dynamic file finding
-    tokens_path = os.path.join(model_dir, "tokens.txt")
-    enc_files = glob.glob(os.path.join(model_dir, "encoder-*.onnx"))
-    dec_files = glob.glob(os.path.join(model_dir, "decoder-*.onnx"))
-    join_files = glob.glob(os.path.join(model_dir, "joiner-*.onnx"))
-    
-    if not (enc_files and dec_files and join_files):
-         logging.error(f"❌ Could not find model files in {model_dir}")
-         sys.exit(1)
-         
-    encoder_path = enc_files[0]
-    decoder_path = dec_files[0]
-    joiner_path = join_files[0]
-    
-    vad_model = os.path.join(model_dir, "silero_vad.onnx")
-
-    missing_files = []
-    for p in [tokens_path, encoder_path, decoder_path, joiner_path, vad_model]:
-        if not os.path.exists(p):
-            missing_files.append(p)
-            
-    if missing_files:
-        logging.error(f"❌ Thiếu model files: {missing_files}")
-        logging.error(f"Contents of {model_dir}: {os.listdir(model_dir)}")
-        sys.exit(1)
-
-    hotwords_file = "hotwords.txt" if os.path.exists("hotwords.txt") else ""
-    if hotwords_file:
-        logging.info(f"🔥 Đã phát hiện hotwords: {hotwords_file}")
-
-    logging.info("⏳ Đang tải Offline Recognizer...")
-    recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-        tokens=tokens_path,
-        encoder=encoder_path,
-        decoder=decoder_path,
-        joiner=joiner_path,
+    logging.info("⏳ Loading Vietnamese Recognizer...")
+    recognizer_vi = sherpa_onnx.OfflineRecognizer.from_transducer(
+        tokens=tokens_vi,
+        encoder=encoder_vi,
+        decoder=decoder_vi,
+        joiner=joiner_vi,
         num_threads=2,
         sample_rate=16000,
         feature_dim=80,
         decoding_method="modified_beam_search",
         max_active_paths=4,
-        hotwords_file=hotwords_file,
-        hotwords_score=10.0, # Boosted from 2.0 to 10.0 to force recognition
+        hotwords_file="hotwords.txt" if os.path.exists("hotwords.txt") else "",
+        hotwords_score=10.0,
     )
-    
-    logging.info("⏳ Đang tải VAD...")
-    
-    # [DEBUG] Check file header
-    if os.path.exists(vad_model):
-        try:
-            with open(vad_model, "rb") as f:
-                header = f.read(64)
-                logging.info(f"🔍 VAD Header (hex): {header.hex()}")
-                logging.info(f"🔍 VAD Header (text): {header}")
-        except Exception as e:
-             logging.error(f"❌ Cannot read VAD header: {e}")
 
+    # --- English Recognizer ---
+    model_dir_en = "./model_en"
+    recognizer_en = None
+    if os.path.exists(model_dir_en) and glob.glob(os.path.join(model_dir_en, "encoder-*.onnx")):
+        tokens_en = os.path.join(model_dir_en, "tokens.txt")
+        encoder_en = glob.glob(os.path.join(model_dir_en, "encoder-*.onnx"))[0]
+        decoder_en = glob.glob(os.path.join(model_dir_en, "decoder-*.onnx"))[0]
+        joiner_en = glob.glob(os.path.join(model_dir_en, "joiner-*.onnx"))[0]
+        
+        logging.info("⏳ Loading English Recognizer...")
+        recognizer_en = sherpa_onnx.OfflineRecognizer.from_transducer(
+            tokens=tokens_en,
+            encoder=encoder_en,
+            decoder=decoder_en,
+            joiner=joiner_en,
+            num_threads=2,
+            sample_rate=16000,
+            feature_dim=80,
+            decoding_method="modified_beam_search",
+            max_active_paths=4,
+        )
+
+    # --- Shared VAD ---
+    vad_model = os.path.join(model_dir_vi, "silero_vad.onnx")
     vad_config = sherpa_onnx.VadModelConfig()
     vad_config.silero_vad.model = vad_model
     vad_config.sample_rate = 16000
     vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=60)
 
-    logging.info("✅ Hệ thống đã sẵn sàng!")
-    return recognizer, vad
+    logging.info("✅ Systems Ready!")
+    return recognizer_vi, recognizer_en, vad
 
 import scipy.signal
 
@@ -214,15 +246,21 @@ class AudioPreprocessor:
         
         return normalized_chunk
 
-recognizer, vad = create_components()
+recognizer_vi, recognizer_en, vad = create_components()
 
 async def handle_connection(websocket):
-    logging.info("🔗 Client đã kết nối")
+    # Parse language from URL
+    from urllib.parse import urlparse, parse_qs
+    query = urlparse(websocket.request.path).query
+    params = parse_qs(query)
+    language = params.get("language", ["vi"])[0]
     
-    # ... (VAD Init Code) ...
+    selected_recognizer = recognizer_en if (language == "en" and recognizer_en) else recognizer_vi
+    logging.info(f"🔗 Client connected [Lang: {language}]")
+    
     import uuid
     conn_id = str(uuid.uuid4())[:8]
-    logging.info(f"🔗 [{conn_id}] Client đã kết nối")
+    logging.info(f"🔗 [{conn_id}] Client connected")
     
     model_dir = "./model_vi"
     vad_model = os.path.join(model_dir, "silero_vad.onnx")
@@ -261,7 +299,7 @@ async def handle_connection(websocket):
                 return
 
             loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, decode_buffer_sync, recognizer, buffer_copy)
+            text = await loop.run_in_executor(None, decode_buffer_sync, selected_recognizer, buffer_copy, language)
             
             if sentence_id != current_sentence_id:
                 return
@@ -337,9 +375,9 @@ async def handle_connection(websocket):
                 
                 # 2. Decode FULL Buffer
                 if len(rolling_buffer) > 1600: 
-                    stream = recognizer.create_stream()
+                    stream = selected_recognizer.create_stream()
                     stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
-                    recognizer.decode_stream(stream)
+                    selected_recognizer.decode_stream(stream)
                     result = stream.result
                     
 
@@ -426,9 +464,9 @@ async def handle_connection(websocket):
             # Set to 8s as a balanced limit
             if len(rolling_buffer) > 128000: # 16000 * 8s
                  logging.info(f"⚠️ Forced Segmentation (Long Speech > 8s)")
-                 stream = recognizer.create_stream()
+                 stream = selected_recognizer.create_stream()
                  stream.accept_waveform(16000, np.array(rolling_buffer, dtype=np.float32))
-                 recognizer.decode_stream(stream)
+                 selected_recognizer.decode_stream(stream)
                  # [FIX] Lowercase forced segment
                  text = stream.result.text.strip().lower()
                  
@@ -528,11 +566,32 @@ async def handle_connection(websocket):
         logging.error(f"❌ Lỗi connection: {e}")
 
 # Helper for threaded decoding
-def decode_buffer_sync(recognizer, buffer_array):
+def decode_buffer_sync(recognizer, buffer_array, language="vi"):
     stream = recognizer.create_stream()
     stream.accept_waveform(16000, buffer_array)
     recognizer.decode_stream(stream)
-    return stream.result.text.strip().lower()
+    result = stream.result
+    
+    if language == "en":
+        # BPE token merging for English
+        raw_tokens = result.tokens
+        raw_times = result.timestamps
+        
+        word_buffer = ""
+        for j, token in enumerate(raw_tokens):
+            # U+2581 check
+            has_boundary = token.startswith('\u2581') or token.startswith(' ')
+            content = token.replace('\u2581', '').replace(' ', '').strip()
+            if not content: continue
+            
+            if has_boundary:
+                if word_buffer: word_buffer += " "
+                word_buffer += content
+            else:
+                word_buffer += content
+        return word_buffer.strip().lower()
+        
+    return result.text.strip().lower()
 
 async def main():
     server = await websockets.serve(handle_connection, "0.0.0.0", PORT, ping_interval=None)
