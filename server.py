@@ -149,10 +149,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def create_components():
     # --- Vietnamese Recognizer ---
     model_dir_vi = "./model_vi"
-    tokens_vi = os.path.join(model_dir_vi, "tokens.txt")
-    encoder_vi = glob.glob(os.path.join(model_dir_vi, "encoder-*.onnx"))[0]
-    decoder_vi = glob.glob(os.path.join(model_dir_vi, "decoder-*.onnx"))[0]
-    joiner_vi = glob.glob(os.path.join(model_dir_vi, "joiner-*.onnx"))[0]
+    # tokens_vi = os.path.join(model_dir_vi, "tokens.txt")
+    # encoder_vi = glob.glob(os.path.join(model_dir_vi, "encoder-*.onnx"))[0]
+    # decoder_vi = glob.glob(os.path.join(model_dir_vi, "decoder-*.onnx"))[0]
+    # joiner_vi = glob.glob(os.path.join(model_dir_vi, "joiner-*.onnx"))[0]
+    # tokens_vi = "model_vi_fine_tune/tokens.txt"
+    # encoder_vi = "model_vi_fine_tune/base/encoder-epoch-10-avg-1.int8.onnx"
+    # decoder_vi = "model_vi_fine_tune/base/decoder-epoch-10-avg-1.int8.onnx"
+    # joiner_vi  = "model_vi_fine_tune/base/joiner-epoch-10-avg-1.int8.onnx"
+    tokens_vi = "model_hy/token.txt"
+    encoder_vi = "model_hy/encoder-epoch-20-avg-10.onnx"
+    decoder_vi = "model_hy/decoder-epoch-20-avg-10.onnx"
+    joiner_vi  = "model_hy/joiner-epoch-20-avg-10.onnx"
     
     logging.info("⏳ Loading Vietnamese Recognizer...")
     recognizer_vi = sherpa_onnx.OfflineRecognizer.from_transducer(
@@ -306,7 +314,7 @@ async def handle_connection(websocket):
             
             if text:
                  # [FILTER] Apply same filter to Partial Results (Trim Text)
-                 text = re.sub(r'\b(ừ|à|ờ|um|uh)(\s+\1)+\b', '', text)
+                 text = re.sub(r'\b(ừ|à|ờ|um|uh|<)(\s+\1)+\b', '', text)
                  if re.fullmatch(r'^(ừ|à|ờ|um|uh)+$', text): 
                     text = ""
                     
