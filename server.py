@@ -139,6 +139,110 @@ def check_and_download_en_models():
 # Run En check
 check_and_download_en_models()
 
+# --- AUTO-UPDATE: Fine-tuned Vietnamese model from GitHub Releases ---
+FINETUNED_REPO = "NguyenVanHung2004/zipFormerModel"
+FINETUNED_MODEL_DIR = "model_ft"
+FINETUNED_VERSION_FILE = os.path.join(FINETUNED_MODEL_DIR, ".version")
+
+def check_and_download_finetuned_model():
+    """
+    Polls GitHub Releases API for the latest int8 fine-tuned model.
+    Downloads only if a newer version is available.
+    Requires 4 components: tokens.txt, encoder*.int8.onnx, decoder*.int8.onnx, joiner*.int8.onnx
+    Falls back to model_hy/ if anything goes wrong.
+    """
+    import json as _json
+    import urllib.error
+
+    api_url = f"https://api.github.com/repos/{FINETUNED_REPO}/releases/latest"
+    print(f"🔍 Checking for latest fine-tuned model at {api_url}...")
+
+    try:
+        req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json",
+                                                        "User-Agent": "zipformer-server"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            release = _json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"⚠️  Cannot reach GitHub API: {e}. Skipping fine-tune model update.")
+        return
+
+    latest_tag = release.get("tag_name", "")
+    if not latest_tag:
+        print("⚠️  No tag found in release. Skipping.")
+        return
+
+    # Read cached version
+    cached_tag = ""
+    if os.path.exists(FINETUNED_VERSION_FILE):
+        with open(FINETUNED_VERSION_FILE, "r") as f:
+            cached_tag = f.read().strip()
+
+    if cached_tag == latest_tag:
+        print(f"✅ Fine-tuned model already up-to-date ({latest_tag}). Skipping download.")
+        return
+
+    print(f"🆕 New fine-tuned model found: {latest_tag} (cached: '{cached_tag or 'none'}'). Checking assets...")
+
+    # Find the 4 required int8 assets
+    assets = release.get("assets", [])
+    asset_map = {a["name"]: a["browser_download_url"] for a in assets}
+
+    # Identify int8 encoder/decoder/joiner by pattern
+    def find_asset(prefix, suffix=".int8.onnx"):
+        candidates = [name for name in asset_map if name.startswith(prefix) and name.endswith(suffix)]
+        return asset_map[candidates[0]] if candidates else None
+
+    tokens_url    = asset_map.get("tokens.txt")
+    encoder_url   = find_asset("encoder")
+    decoder_url   = find_asset("decoder")
+    joiner_url    = find_asset("joiner")
+
+    missing = [n for n, u in [("tokens.txt", tokens_url), ("encoder*.int8.onnx", encoder_url),
+                               ("decoder*.int8.onnx", decoder_url), ("joiner*.int8.onnx", joiner_url)] if not u]
+    if missing:
+        print(f"⚠️  Release {latest_tag} is missing required files: {missing}. Skipping.")
+        return
+
+    print(f"✅ All 4 int8 components found. Downloading to '{FINETUNED_MODEL_DIR}/'...")
+    os.makedirs(FINETUNED_MODEL_DIR, exist_ok=True)
+
+    # Helper: extract filename from URL
+    def fname(url):
+        return url.split("/")[-1]
+
+    downloads = [
+        (tokens_url,  os.path.join(FINETUNED_MODEL_DIR, "tokens.txt")),
+        (encoder_url, os.path.join(FINETUNED_MODEL_DIR, fname(encoder_url))),
+        (decoder_url, os.path.join(FINETUNED_MODEL_DIR, fname(decoder_url))),
+        (joiner_url,  os.path.join(FINETUNED_MODEL_DIR, fname(joiner_url))),
+    ]
+
+    # Remove old int8 onnx files before downloading new ones
+    for old in glob.glob(os.path.join(FINETUNED_MODEL_DIR, "*.int8.onnx")):
+        try: os.remove(old)
+        except: pass
+
+    all_ok = True
+    for url, dst in downloads:
+        if not download_file(url, dst):
+            all_ok = False
+            break
+
+    if all_ok:
+        # Save version tag so we don't re-download next time
+        with open(FINETUNED_VERSION_FILE, "w") as f:
+            f.write(latest_tag)
+        print(f"🎉 Fine-tuned model updated to {latest_tag}!")
+    else:
+        print("❌ Fine-tune model download failed. Will fall back to model_hy/.")
+        # Clean up partial downloads
+        for _, dst in downloads:
+            if os.path.exists(dst):
+                try: os.remove(dst)
+                except: pass
+
+# Run fine-tune model check
+check_and_download_finetuned_model()
 
 
 # --- CONFIGURATION ---
@@ -146,21 +250,39 @@ PORT = int(os.environ.get("PORT", 6006))
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def _resolve_vi_model_paths():
+    """
+    Returns (tokens, encoder, decoder, joiner) paths for the Vietnamese model.
+    Priority:
+      1. model_ft/  — latest auto-downloaded fine-tuned int8
+      2. model_hy/  — fallback (legacy fine-tune)
+    """
+    ft_tokens  = os.path.join(FINETUNED_MODEL_DIR, "tokens.txt")
+    ft_encoders = glob.glob(os.path.join(FINETUNED_MODEL_DIR, "encoder-*.int8.onnx"))
+    ft_decoders = glob.glob(os.path.join(FINETUNED_MODEL_DIR, "decoder-*.int8.onnx"))
+    ft_joiners  = glob.glob(os.path.join(FINETUNED_MODEL_DIR, "joiner-*.int8.onnx"))
+
+    if (os.path.exists(ft_tokens)
+            and ft_encoders and ft_decoders and ft_joiners):
+        logging.info(f"🤖 Using fine-tuned model from '{FINETUNED_MODEL_DIR}/' "
+                     f"(version: {open(FINETUNED_VERSION_FILE).read().strip() if os.path.exists(FINETUNED_VERSION_FILE) else 'unknown'})")
+        return ft_tokens, ft_encoders[0], ft_decoders[0], ft_joiners[0]
+
+    # Fallback
+    logging.warning(f"⚠️  '{FINETUNED_MODEL_DIR}/' incomplete or missing – falling back to model_hy/")
+    return (
+        "model_hy/token.txt",
+        "model_hy/encoder-epoch-20-avg-10.onnx",
+        "model_hy/decoder-epoch-20-avg-10.onnx",
+        "model_hy/joiner-epoch-20-avg-10.onnx",
+    )
+
+
 def create_components():
     # --- Vietnamese Recognizer ---
     model_dir_vi = "./model_vi"
-    # tokens_vi = os.path.join(model_dir_vi, "tokens.txt")
-    # encoder_vi = glob.glob(os.path.join(model_dir_vi, "encoder-*.onnx"))[0]
-    # decoder_vi = glob.glob(os.path.join(model_dir_vi, "decoder-*.onnx"))[0]
-    # joiner_vi = glob.glob(os.path.join(model_dir_vi, "joiner-*.onnx"))[0]
-    # tokens_vi = "model_vi_fine_tune/tokens.txt"
-    # encoder_vi = "model_vi_fine_tune/base/encoder-epoch-10-avg-1.int8.onnx"
-    # decoder_vi = "model_vi_fine_tune/base/decoder-epoch-10-avg-1.int8.onnx"
-    # joiner_vi  = "model_vi_fine_tune/base/joiner-epoch-10-avg-1.int8.onnx"
-    tokens_vi = "model_hy/token.txt"
-    encoder_vi = "model_hy/encoder-epoch-20-avg-10.onnx"
-    decoder_vi = "model_hy/decoder-epoch-20-avg-10.onnx"
-    joiner_vi  = "model_hy/joiner-epoch-20-avg-10.onnx"
+
+    tokens_vi, encoder_vi, decoder_vi, joiner_vi = _resolve_vi_model_paths()
     
     logging.info("⏳ Loading Vietnamese Recognizer...")
     recognizer_vi = sherpa_onnx.OfflineRecognizer.from_transducer(
