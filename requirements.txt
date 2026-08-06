@@ -1,4 +1,4 @@
-sherpa-onnx==1.12.20
+sherpa-onnx>=1.12.26
 websockets
 numpy
 scipy
