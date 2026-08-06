@@ -44,6 +44,7 @@ test_ZipFormer/
 ├── test_mic_client.py              # Client VI – mic realtime → server
 ├── test_mic_client_en.py           # Test offline model (xem file để biết chi tiết)
 ├── wav_1.wav                       # Audio mẫu
+├── .env.example                    # Mẫu biến môi trường (PORT, …) — copy thành .env nếu muốn local
 ├── .gitignore                      # Bỏ qua model_vi/, model_en/, .venv/, __pycache__/
 ├── .gitattributes                  # Coi *.onnx là binary (tránh diff)
 ├── model_vi/                       # (gitignored) Vietnamese base Zipformer INT8 + silero_vad – auto-download
@@ -198,7 +199,8 @@ Vào tab **Variables** của service trên Zeabur, thêm nếu muốn:
 | Biến | Mặc định | Mô tả |
 |---|---|---|
 | `PORT` | `6006` | Zeabur sẽ tự inject port nếu dùng auto-binding |
-| `GITHUB_TOKEN` | _(không có)_ | _(không dùng — đã bỏ phần auto-update từ GitHub Releases)_ |
+
+> Xem file `.env.example` để biết các biến môi trường hỗ trợ. Hiện tại chỉ `PORT` được `server.py` đọc qua `os.environ`.
 
 ### 4. Theo dõi log
 
@@ -386,7 +388,7 @@ Nói vào mic, terminal sẽ hiển thị partial transcript realtime và từng
 |---|---|
 | Build fail trên Zeabur vì thiếu `g++` | Nếu dùng `Dockerfile` với `sherpa-onnx` wheel prebuilt → không cần C compiler. Còn nếu Zeabur tự build từ `requirements.txt` thì wheel vẫn có sẵn trên PyPI; nếu vẫn fail, thêm `RUN apt-get install -y build-essential` trước `pip install`. |
 | Model tải lại mỗi lần deploy | Mount Zeabur Volume vào `/app/model_vi` và `/app/model_en` để cache auto-download. `model_hy/` đã commit sẵn nên fallback luôn có. |
-| `model_ft/` không tải được | Set biến môi trường `GITHUB_TOKEN` để tăng rate-limit. Nếu vẫn fail, server tự fallback sang `model_hy/` (FP32). |
+| `model_ft/` không tải được | Server thử lại mỗi lần khởi động. Nếu vẫn fail, tự fallback sang `model_hy/` (FP32). |
 | Quá nhiều false positive từ VAD | Tăng `vad_config.silero_vad.threshold` (hiện 0.55) trong `server.py`. |
 | Câu dài bị nuốt mất cuối | Server có **forced segmentation** tại 8s nếu không có khoảng lặng. |
 | Muốn hotwords riêng | Sửa `hotwords.txt` (mỗi dòng một từ), hotwords score đang là `10.0`. |
